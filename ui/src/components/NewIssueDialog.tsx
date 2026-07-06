@@ -441,6 +441,10 @@ export function NewIssueDialog() {
   const [dialogCompanyId, setDialogCompanyId] = useState<string | null>(null);
   const [stagedFiles, setStagedFiles] = useState<StagedIssueFile[]>([]);
   const [isFileDragOver, setIsFileDragOver] = useState(false);
+  const [stagedInlineDocs, setStagedInlineDocs] = useState<{ id: string; key: string; body: string }[]>([]);
+  const [showInlineDocForm, setShowInlineDocForm] = useState(false);
+  const [inlineDocKey, setInlineDocKey] = useState("");
+  const [inlineDocBody, setInlineDocBody] = useState("");
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const executionWorkspaceDefaultProjectId = useRef<string | null>(null);
   const initializationKeyRef = useRef<string | null>(null);
@@ -567,8 +571,9 @@ export function NewIssueDialog() {
     mutationFn: async ({
       companyId,
       stagedFiles: pendingStagedFiles,
+      stagedInlineDocs: pendingInlineDocs,
       ...data
-    }: { companyId: string; stagedFiles: StagedIssueFile[] } & Record<string, unknown>) => {
+    }: { companyId: string; stagedFiles: StagedIssueFile[]; stagedInlineDocs: { id: string; key: string; body: string }[] } & Record<string, unknown>) => {
       const issue = await issuesApi.create(companyId, data);
       const failures: string[] = [];
 
@@ -587,6 +592,19 @@ export function NewIssueDialog() {
           }
         } catch {
           failures.push(stagedFile.file.name);
+        }
+      }
+
+      for (const doc of pendingInlineDocs) {
+        try {
+          await issuesApi.upsertDocument(issue.id, doc.key, {
+            title: doc.key === "plan" ? null : doc.key,
+            format: "markdown",
+            body: doc.body,
+            baseRevisionId: null,
+          });
+        } catch {
+          failures.push(doc.key);
         }
       }
 
@@ -938,6 +956,10 @@ export function NewIssueDialog() {
     setDialogCompanyId(null);
     setStagedFiles([]);
     setIsFileDragOver(false);
+    setStagedInlineDocs([]);
+    setShowInlineDocForm(false);
+    setInlineDocKey("");
+    setInlineDocBody("");
     setCompanyOpen(false);
     executionWorkspaceDefaultProjectId.current = null;
     initializationKeyRef.current = null;
@@ -1010,6 +1032,7 @@ export function NewIssueDialog() {
     createIssue.mutate({
       companyId: effectiveCompanyId,
       stagedFiles,
+      stagedInlineDocs,
       title: currentTitle,
       description: currentDescription || undefined,
       status,
@@ -1109,7 +1132,7 @@ export function NewIssueDialog() {
     setStagedFiles((current) => current.filter((file) => file.id !== id));
   }
 
-  const hasDraft = draftHasText || stagedFiles.length > 0;
+  const hasDraft = draftHasText || stagedFiles.length > 0 || stagedInlineDocs.length > 0;
   const currentStatus = statuses.find((s) => s.value === status) ?? statuses[1]!;
   const currentPriority = priorities.find((p) => p.value === priority);
   const currentAssignee = selectedAssigneeAgentId
@@ -1208,6 +1231,8 @@ export function NewIssueDialog() {
     createIssue.error instanceof Error ? createIssue.error.message : "Failed to create task. Try again.";
   const stagedDocuments = stagedFiles.filter((file) => file.kind === "document");
   const stagedAttachments = stagedFiles.filter((file) => file.kind === "attachment");
+  const inlineDocKeyValid = /^[a-z0-9][a-z0-9_-]*$/.test(inlineDocKey);
+  const allStagedDocs = stagedDocuments.length > 0 || stagedInlineDocs.length > 0;
 
   const handleProjectChange = useCallback((nextProjectId: string) => {
     if (nextProjectId) trackRecentProject(nextProjectId);
@@ -1948,12 +1973,81 @@ export function NewIssueDialog() {
                 onChange={handleDescriptionChange}
               />
             </div>
-            {stagedFiles.length > 0 ? (
+            {showInlineDocForm ? (
+              <div className="mt-4 rounded-lg border border-border/70 p-3 space-y-2">
+                <div className="text-xs font-medium text-muted-foreground">Add document</div>
+                <input
+                  type="text"
+                  className="w-full rounded-md border border-border bg-transparent px-3 py-1.5 font-mono text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                  placeholder="document-key (e.g. spec-brief)"
+                  value={inlineDocKey}
+                  onChange={(e) => setInlineDocKey(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+/, ""))}
+                  disabled={createIssue.isPending}
+                  autoFocus
+                />
+                <textarea
+                  className="w-full resize-none rounded-md border border-border bg-transparent px-3 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                  placeholder="Document content (Markdown)"
+                  rows={6}
+                  value={inlineDocBody}
+                  onChange={(e) => setInlineDocBody(e.target.value)}
+                  disabled={createIssue.isPending}
+                />
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={!inlineDocKeyValid || !inlineDocBody.trim() || createIssue.isPending}
+                    onClick={() => {
+                      setStagedInlineDocs((prev) => [...prev, { id: `inline:${inlineDocKey}:${Date.now()}`, key: inlineDocKey, body: inlineDocBody.trim() }]);
+                      setInlineDocKey("");
+                      setInlineDocBody("");
+                      setShowInlineDocForm(false);
+                    }}
+                  >
+                    Add document
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => { setShowInlineDocForm(false); setInlineDocKey(""); setInlineDocBody(""); }}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : null}
+            {(stagedFiles.length > 0 || stagedInlineDocs.length > 0) ? (
               <div className="mt-4 space-y-3 rounded-lg border border-border/70 p-3">
-              {stagedDocuments.length > 0 ? (
+              {allStagedDocs ? (
                 <div className="space-y-2">
                   <div className="text-xs font-medium text-muted-foreground">Documents</div>
                   <div className="space-y-2">
+                    {stagedInlineDocs.map((doc) => (
+                      <div key={doc.id} className="flex items-start justify-between gap-3 rounded-md border border-border/70 px-3 py-2">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="rounded-full border border-border px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.16em] text-muted-foreground">
+                              {doc.key}
+                            </span>
+                          </div>
+                          <div className="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
+                            <FileText className="h-3.5 w-3.5" />
+                            <span className="truncate">{doc.body.slice(0, 60)}{doc.body.length > 60 ? "…" : ""}</span>
+                          </div>
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          className="shrink-0 text-muted-foreground"
+                          onClick={() => setStagedInlineDocs((prev) => prev.filter((d) => d.id !== doc.id))}
+                          disabled={createIssue.isPending}
+                          title="Remove document"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    ))}
                     {stagedDocuments.map((file) => (
                       <div key={file.id} className="flex items-start justify-between gap-3 rounded-md border border-border/70 px-3 py-2">
                         <div className="min-w-0">
@@ -2105,6 +2199,14 @@ export function NewIssueDialog() {
             onChange={handleStageFilesPicked}
             multiple
           />
+          <button
+            className="inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent/50 transition-colors text-muted-foreground"
+            onClick={() => { setShowInlineDocForm((v) => !v); setInlineDocKey(""); setInlineDocBody(""); }}
+            disabled={createIssue.isPending}
+          >
+            <FileText className="h-3 w-3" />
+            Document
+          </button>
           <button
             className="inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent/50 transition-colors text-muted-foreground"
             onClick={() => stageFileInputRef.current?.click()}
