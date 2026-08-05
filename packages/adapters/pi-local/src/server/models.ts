@@ -205,7 +205,7 @@ export async function ensurePiModelConfiguredAndAvailable(input: {
     // agent can still authenticate with the provider even if pi --list-models
     // cannot.
     console.warn(`[pi-local] Model discovery failed for ${model}, using fallback:`, (e as Error).message?.slice(0, 120));
-    return [{ id: model, name: model } as AdapterModel];
+    return [{ id: model, label: model } as AdapterModel];
   }
 }
 
