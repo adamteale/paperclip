@@ -1,6 +1,6 @@
 {
-  "id": "554aeda3-7b34-4af6-b040-0431b0f5649f",
-  "prevId": "ecc034cd-9b49-418f-b40e-7372ef1e6eeb",
+  "id": "6672c7b5-6fb3-426d-951e-db98eab78ab3",
+  "prevId": "d925c84b-41b6-42d1-a0f9-4ee090ef3cd1",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -235,6 +235,217 @@
             "id"
           ],
           "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.adapter_auth_sessions": {
+      "name": "adapter_auth_sessions",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "environment_id": {
+          "name": "environment_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "adapter_type": {
+          "name": "adapter_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "started_by_user_id": {
+          "name": "started_by_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "provider_lease_id": {
+          "name": "provider_lease_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'starting'"
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "promotion_expires_at": {
+          "name": "promotion_expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "finished_at": {
+          "name": "finished_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "failure_reason": {
+          "name": "failure_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "adapter_auth_sessions_company_status_idx": {
+          "name": "adapter_auth_sessions_company_status_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "adapter_auth_sessions_company_adapter_active_uq": {
+          "name": "adapter_auth_sessions_company_adapter_active_uq",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "adapter_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"adapter_auth_sessions\".\"status\" IN ('starting', 'waiting_for_user', 'promoting')",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "adapter_auth_sessions_environment_idx": {
+          "name": "adapter_auth_sessions_environment_idx",
+          "columns": [
+            {
+              "expression": "environment_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "adapter_auth_sessions_expires_idx": {
+          "name": "adapter_auth_sessions_expires_idx",
+          "columns": [
+            {
+              "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "adapter_auth_sessions_provider_lease_idx": {
+          "name": "adapter_auth_sessions_provider_lease_idx",
+          "columns": [
+            {
+              "expression": "provider_lease_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "adapter_auth_sessions_company_id_companies_id_fk": {
+          "name": "adapter_auth_sessions_company_id_companies_id_fk",
+          "tableFrom": "adapter_auth_sessions",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "adapter_auth_sessions_environment_id_environments_id_fk": {
+          "name": "adapter_auth_sessions_environment_id_environments_id_fk",
+          "tableFrom": "adapter_auth_sessions",
+          "tableTo": "environments",
+          "columnsFrom": [
+            "environment_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
@@ -4325,6 +4536,187 @@
       },
       "isRLSEnabled": false
     },
+    "public.claude_setup_token_sessions": {
+      "name": "claude_setup_token_sessions",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "session_id": {
+          "name": "session_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "owner_user_id": {
+          "name": "owner_user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "adapter_type": {
+          "name": "adapter_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "environment_id": {
+          "name": "environment_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "lease_id": {
+          "name": "lease_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "state": {
+          "name": "state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'starting'"
+        },
+        "deadline_at": {
+          "name": "deadline_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "bound_at": {
+          "name": "bound_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "claude_setup_token_sessions_active_uq": {
+          "name": "claude_setup_token_sessions_active_uq",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "owner_user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "adapter_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "environment_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"claude_setup_token_sessions\".\"state\" IN ('starting', 'awaiting_code', 'submitting', 'persisting')",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "claude_setup_token_sessions_session_id_uq": {
+          "name": "claude_setup_token_sessions_session_id_uq",
+          "columns": [
+            {
+              "expression": "session_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "claude_setup_token_sessions_deadline_idx": {
+          "name": "claude_setup_token_sessions_deadline_idx",
+          "columns": [
+            {
+              "expression": "deadline_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "claude_setup_token_sessions_company_id_companies_id_fk": {
+          "name": "claude_setup_token_sessions_company_id_companies_id_fk",
+          "tableFrom": "claude_setup_token_sessions",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "claude_setup_token_sessions_environment_id_environments_id_fk": {
+          "name": "claude_setup_token_sessions_environment_id_environments_id_fk",
+          "tableFrom": "claude_setup_token_sessions",
+          "tableTo": "environments",
+          "columnsFrom": [
+            "environment_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.cli_auth_challenges": {
       "name": "cli_auth_challenges",
       "schema": "",
@@ -4944,6 +5336,176 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.company_onboarding_seeds": {
+      "name": "company_onboarding_seeds",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "revision": {
+          "name": "revision",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "mission": {
+          "name": "mission",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "agent_name": {
+          "name": "agent_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "agent_role": {
+          "name": "agent_role",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "first_task_title": {
+          "name": "first_task_title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "first_task_details": {
+          "name": "first_task_details",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "goal_id": {
+          "name": "goal_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "agent_id": {
+          "name": "agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "issue_id": {
+          "name": "issue_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "applied_at": {
+          "name": "applied_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "company_onboarding_seeds_company_uq": {
+          "name": "company_onboarding_seeds_company_uq",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "company_onboarding_seeds_company_id_companies_id_fk": {
+          "name": "company_onboarding_seeds_company_id_companies_id_fk",
+          "tableFrom": "company_onboarding_seeds",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "company_onboarding_seeds_goal_id_goals_id_fk": {
+          "name": "company_onboarding_seeds_goal_id_goals_id_fk",
+          "tableFrom": "company_onboarding_seeds",
+          "tableTo": "goals",
+          "columnsFrom": [
+            "goal_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "company_onboarding_seeds_agent_id_agents_id_fk": {
+          "name": "company_onboarding_seeds_agent_id_agents_id_fk",
+          "tableFrom": "company_onboarding_seeds",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "company_onboarding_seeds_issue_id_issues_id_fk": {
+          "name": "company_onboarding_seeds_issue_id_issues_id_fk",
+          "tableFrom": "company_onboarding_seeds",
+          "tableTo": "issues",
+          "columnsFrom": [
+            "issue_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.company_secret_bindings": {
       "name": "company_secret_bindings",
       "schema": "",
@@ -5304,6 +5866,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "interaction_id": {
+          "name": "interaction_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "resolved_by_user_id": {
           "name": "resolved_by_user_id",
           "type": "text",
@@ -5439,6 +6007,21 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "company_secret_proposals_interaction_idx": {
+          "name": "company_secret_proposals_interaction_idx",
+          "columns": [
+            {
+              "expression": "interaction_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -5531,6 +6114,19 @@
             "id"
           ],
           "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "company_secret_proposals_interaction_id_issue_thread_interactions_id_fk": {
+          "name": "company_secret_proposals_interaction_id_issue_thread_interactions_id_fk",
+          "tableFrom": "company_secret_proposals",
+          "tableTo": "issue_thread_interactions",
+          "columnsFrom": [
+            "interaction_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
           "onUpdate": "no action"
         },
         "company_secret_proposals_created_secret_id_company_secrets_id_fk": {
@@ -8063,6 +8659,200 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.company_transfer_runs": {
+      "name": "company_transfer_runs",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "direction": {
+          "name": "direction",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "actor_key": {
+          "name": "actor_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "container_ref": {
+          "name": "container_ref",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "idempotency_key": {
+          "name": "idempotency_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "manifest_sha256": {
+          "name": "manifest_sha256",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "manifest": {
+          "name": "manifest",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "chunk_count": {
+          "name": "chunk_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "blob_count": {
+          "name": "blob_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "completed_parts": {
+          "name": "completed_parts",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "error": {
+          "name": "error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "started_at": {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "finished_at": {
+          "name": "finished_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "company_transfer_runs_company_idx": {
+          "name": "company_transfer_runs_company_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "company_transfer_runs_idempotency_direction_idx": {
+          "name": "company_transfer_runs_idempotency_direction_idx",
+          "columns": [
+            {
+              "expression": "idempotency_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "direction",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "company_transfer_runs_actor_status_idx": {
+          "name": "company_transfer_runs_actor_status_idx",
+          "columns": [
+            {
+              "expression": "actor_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "company_transfer_runs_company_id_companies_id_fk": {
+          "name": "company_transfer_runs_company_id_companies_id_fk",
+          "tableFrom": "company_transfer_runs",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.company_user_sidebar_preferences": {
       "name": "company_user_sidebar_preferences",
       "schema": "",
@@ -8471,7 +9261,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "set null",
           "onUpdate": "no action"
         },
         "cost_events_project_id_projects_id_fk": {
@@ -12966,7 +13756,7 @@
           "name": "environment_id",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "execution_workspace_id": {
           "name": "execution_workspace_id",
@@ -13217,7 +14007,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
+          "onDelete": "set null",
           "onUpdate": "no action"
         },
         "environment_leases_execution_workspace_id_execution_workspaces_id_fk": {
@@ -13405,6 +14195,240 @@
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.execution_workspace_runtime_leases": {
+      "name": "execution_workspace_runtime_leases",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "execution_workspace_id": {
+          "name": "execution_workspace_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "owner_key": {
+          "name": "owner_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "owner_issue_id": {
+          "name": "owner_issue_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "owner_run_id": {
+          "name": "owner_run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "owner_agent_id": {
+          "name": "owner_agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_action": {
+          "name": "last_action",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "claimed_at": {
+          "name": "claimed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "renewed_at": {
+          "name": "renewed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "metadata": {
+          "name": "metadata",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "execution_workspace_runtime_leases_company_workspace_idx": {
+          "name": "execution_workspace_runtime_leases_company_workspace_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "execution_workspace_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "execution_workspace_runtime_leases_company_owner_idx": {
+          "name": "execution_workspace_runtime_leases_company_owner_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "owner_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "execution_workspace_runtime_leases_expires_at_idx": {
+          "name": "execution_workspace_runtime_leases_expires_at_idx",
+          "columns": [
+            {
+              "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "execution_workspace_runtime_leases_company_id_companies_id_fk": {
+          "name": "execution_workspace_runtime_leases_company_id_companies_id_fk",
+          "tableFrom": "execution_workspace_runtime_leases",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "execution_workspace_runtime_leases_execution_workspace_id_execution_workspaces_id_fk": {
+          "name": "execution_workspace_runtime_leases_execution_workspace_id_execution_workspaces_id_fk",
+          "tableFrom": "execution_workspace_runtime_leases",
+          "tableTo": "execution_workspaces",
+          "columnsFrom": [
+            "execution_workspace_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "execution_workspace_runtime_leases_owner_issue_id_issues_id_fk": {
+          "name": "execution_workspace_runtime_leases_owner_issue_id_issues_id_fk",
+          "tableFrom": "execution_workspace_runtime_leases",
+          "tableTo": "issues",
+          "columnsFrom": [
+            "owner_issue_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "execution_workspace_runtime_leases_owner_run_id_heartbeat_runs_id_fk": {
+          "name": "execution_workspace_runtime_leases_owner_run_id_heartbeat_runs_id_fk",
+          "tableFrom": "execution_workspace_runtime_leases",
+          "tableTo": "heartbeat_runs",
+          "columnsFrom": [
+            "owner_run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "execution_workspace_runtime_leases_owner_agent_id_agents_id_fk": {
+          "name": "execution_workspace_runtime_leases_owner_agent_id_agents_id_fk",
+          "tableFrom": "execution_workspace_runtime_leases",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "owner_agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "execution_workspace_runtime_leases_execution_workspace_id_unique": {
+          "name": "execution_workspace_runtime_leases_execution_workspace_id_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "execution_workspace_id"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -15081,7 +16105,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
@@ -15446,7 +16470,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "set null",
           "onUpdate": "no action"
         },
         "finance_events_project_id_projects_id_fk": {
@@ -18592,7 +19616,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "cascade",
           "onUpdate": "no action"
         },
         "issue_comments_author_agent_id_agents_id_fk": {
@@ -19346,7 +20370,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "cascade",
           "onUpdate": "no action"
         },
         "issue_inbox_archives_archived_by_agent_id_agents_id_fk": {
@@ -19937,7 +20961,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
@@ -20862,14 +21886,28 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "default": "'board_only'"
+          "default": "'anyone'"
         },
         "effective_resolver_policy": {
           "name": "effective_resolver_policy",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "default": "'board_only'"
+          "default": "'anyone'"
+        },
+        "resolver_policy_provenance": {
+          "name": "resolver_policy_provenance",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'inherited'"
+        },
+        "effective_resolver_policy_source": {
+          "name": "effective_resolver_policy_source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'requested'"
         },
         "idempotency_key": {
           "name": "idempotency_key",
@@ -21123,7 +22161,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "cascade",
           "onUpdate": "no action"
         },
         "issue_thread_interactions_source_comment_id_issue_comments_id_fk": {
@@ -23342,6 +24380,22 @@
           ],
           "isUnique": true,
           "where": "\"issues\".\"origin_kind\" = 'stranded_issue_recovery'\n          and \"issues\".\"origin_id\" is not null\n          and \"issues\".\"hidden_at\" is null\n          and \"issues\".\"status\" not in ('done', 'cancelled')",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "issues_onboarding_first_task_uq": {
+          "name": "issues_onboarding_first_task_uq",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"issues\".\"origin_kind\" = 'onboarding_first_task'",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -33832,27 +34886,6 @@
           "method": "btree",
           "with": {}
         },
-        "tool_connections_company_name_uq": {
-          "name": "tool_connections_company_name_uq",
-          "columns": [
-            {
-              "expression": "company_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "name",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
         "tool_connections_company_uid_uq": {
           "name": "tool_connections_company_uid_uq",
           "columns": [
@@ -38607,6 +39640,24 @@
         "stop_policy": {
           "name": "stop_policy",
           "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "exposure": {
+          "name": "exposure",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "exposure_handle": {
+          "name": "exposure_handle",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "backend_url": {
+          "name": "backend_url",
+          "type": "text",
           "primaryKey": false,
           "notNull": false
         },
