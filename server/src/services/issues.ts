@@ -11192,7 +11192,6 @@ export function issueService(db: Db) {
           }
           throw err;
         }
-
         if (removedIssue && attachmentAssetIds.length > 0) {
           await tx.delete(assets).where(
             inArray(

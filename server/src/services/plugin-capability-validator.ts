@@ -170,6 +170,7 @@ const UI_SLOT_CAPABILITIES: Record<PluginUiSlotType, PluginCapability> = {
   settingsPage: "instance.settings.register",
   companySettingsPage: "instance.settings.register",
   routeSidebar: "ui.sidebar.register",
+  applyToolItem: "ui.sidebar.register",
 };
 
 /**

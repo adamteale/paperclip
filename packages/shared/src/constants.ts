@@ -1488,6 +1488,7 @@ export const PLUGIN_UI_SLOT_TYPES = [
   "commentContextMenuItem",
   "settingsPage",
   "companySettingsPage",
+  "applyToolItem",
 ] as const;
 export type PluginUiSlotType = (typeof PLUGIN_UI_SLOT_TYPES)[number];
 
