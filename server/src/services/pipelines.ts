@@ -1558,7 +1558,7 @@ async function writeCaseEvent(
     const actor = eventActorPatch(input.actor);
     await logActivity(db as Db, {
       companyId: input.companyId,
-      actorType: actor.actorType,
+      actorType: actor.actorType as "agent" | "user" | "system",
       actorId: actor.actorAgentId ?? actor.actorUserId ?? "system",
       agentId: actor.actorAgentId ?? null,
       runId: actor.runId ?? null,
@@ -4669,7 +4669,36 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
      * changed long after the case entered the stage (no event bus, no hooks —
      * same posture as the children-terminal entry backfill).
      */
-    async sweepIssueGateCases(): Promise<{ evaluated: number; advanced: number }> {
+    async sweepIssueGateCases(): Promise<{ evaluated: number; advanced: number; dispatched: number }> {
+      // Self-heal: any automation ledger still in `pending_dispatch` was created
+      // by an in-transaction transition whose creator could not dispatch
+      // post-commit (e.g. a sweep like this one, or a crashed process). There is
+      // no other reaper for these rows, so this sweep adopts them — execution is
+      // idempotent (executeAutomationLedger re-reads current state and its
+      // conflict target prevents duplicates).
+      const stale = await db
+        .select({ id: pipelineAutomationExecutions.id })
+        .from(pipelineAutomationExecutions)
+        .where(
+          and(
+            eq(pipelineAutomationExecutions.status, "failed"),
+            eq(pipelineAutomationExecutions.error, "pending_dispatch"),
+            sql`${pipelineAutomationExecutions.createdAt} < now() - interval '2 minutes'`,
+          ),
+        )
+        .limit(50);
+      let dispatched = 0;
+      if (stale.length > 0) {
+        for (const row of stale) {
+          try {
+            await executeAutomationLedger(row.id, { type: "system" });
+            dispatched += 1;
+          } catch {
+            // best-effort — retried on the next tick
+          }
+        }
+      }
+
       const candidates = await db
         .select({
           caseRow: pipelineCases,
@@ -4689,6 +4718,12 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       for (const row of candidates) {
         if (!parseIssueGateConfig(stageConfig(row.stage))) continue;
         try {
+          // Ledgers created by the in-tx advance are executed AFTER the
+          // transaction commits — same contract as the public transitionCase:
+          // enqueueStageAutomationLedger writes a pending_dispatch row inside
+          // the tx, and only a post-commit executeAutomationLedgers call turns
+          // it into a real routine dispatch.
+          const ledgers: Array<typeof pipelineAutomationExecutions.$inferSelect> = [];
           const result = await db.transaction(async (tx) => {
             const fresh = await tx
               .select()
@@ -4701,6 +4736,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
               companyId: fresh.companyId,
               caseRow: fresh,
               stage: row.stage,
+              automationLedgers: ledgers,
             });
             const after = await tx
               .select({ stageId: pipelineCases.stageId })
@@ -4711,11 +4747,15 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
             return after !== null && after.stageId !== row.stage.id;
           });
           if (result) advanced += 1;
+          if (ledgers.length > 0) {
+            await executeAutomationLedgers(ledgers, { type: "system" });
+            dispatched += ledgers.length;
+          }
         } catch {
           // Best-effort per case: a failing candidate must not abort the sweep.
         }
       }
-      return { evaluated: candidates.length, advanced };
+      return { evaluated: candidates.length, advanced, dispatched };
     },
 
     async transitionCase(input: {
