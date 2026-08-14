@@ -3,6 +3,7 @@ import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
 import {
   assets,
+  caseDocuments,
   companies,
   documents,
   documentRevisions,
@@ -11,6 +12,7 @@ import {
   issueDocuments,
   issues,
   issueWorkProducts,
+  pipelineCaseCaseLinks,
   pipelineCaseIssueLinks,
   pipelineCases,
 } from "@paperclipai/db";
@@ -377,6 +379,81 @@ export function pipelineCaseOutputsService(db: Db) {
             latestRevisionNumber: row.latestRevisionNumber,
             documentPath: sourceDocumentPath(company.issuePrefix, source.issueIdentifier, source.issueId, row.key),
           });
+        }
+
+        // --- Case documents from linked Cases (experimental Cases system) ---
+        const caseLinkRows = await db
+          .select({
+            linkId: pipelineCaseCaseLinks.id,
+            role: pipelineCaseCaseLinks.role,
+            linkedCaseId: pipelineCaseCaseLinks.linkedCaseId,
+          })
+          .from(pipelineCaseCaseLinks)
+          .where(and(
+            eq(pipelineCaseCaseLinks.companyId, companyId),
+            eq(pipelineCaseCaseLinks.caseId, caseId),
+            isNull(pipelineCaseCaseLinks.retiredAt),
+          ));
+
+        if (caseLinkRows.length > 0) {
+          const linkedCaseIds = caseLinkRows.map((r) => r.linkedCaseId);
+          const caseDocRows = await db
+            .select({
+              caseId: caseDocuments.caseId,
+              key: caseDocuments.key,
+              documentId: documents.id,
+              title: documents.title,
+              format: documents.format,
+              latestBody: documents.latestBody,
+              latestRevisionId: documents.latestRevisionId,
+              latestRevisionNumber: documents.latestRevisionNumber,
+              sourceTrust: documents.sourceTrust,
+              createdByAgentId: documents.createdByAgentId,
+              updatedByAgentId: documents.updatedByAgentId,
+              createdAt: caseDocuments.createdAt,
+              updatedAt: caseDocuments.updatedAt,
+            })
+            .from(caseDocuments)
+            .innerJoin(documents, and(
+              eq(caseDocuments.documentId, documents.id),
+              eq(documents.companyId, caseDocuments.companyId),
+            ))
+            .leftJoin(latestRevision, and(
+              eq(latestRevision.id, documents.latestRevisionId),
+              eq(latestRevision.companyId, documents.companyId),
+            ))
+            .where(and(
+              eq(caseDocuments.companyId, companyId),
+              inArray(caseDocuments.caseId, linkedCaseIds),
+            ));
+
+          for (const row of caseDocRows) {
+            const link = caseLinkRows.find((l) => l.linkedCaseId === row.caseId);
+            items.push({
+              id: `case_document:${row.documentId}`,
+              kind: "document",
+              title: row.title ?? row.key,
+              sourceIssueId: null as unknown as string, // no issue — this comes from a Case
+              sourceIssueIdentifier: null,
+              sourceIssuePath: null as unknown as string,
+              sourceIssueTitle: null as unknown as string,
+              sourceIssueStatus: null as unknown as string,
+              sourceRole: (link?.role ?? "reference") as PipelineCaseOutputSourceRole,
+              sourceTrust: row.sourceTrust ?? null,
+              sourceRunId: null,
+              sourceAgentId: row.updatedByAgentId ?? row.createdByAgentId,
+              preview: previewFor({ body: row.latestBody, sourceTrust: row.sourceTrust }),
+              createdAt: row.createdAt,
+              updatedAt: row.updatedAt,
+              documentId: row.documentId,
+              documentKey: row.key,
+              documentTitle: row.title,
+              format: row.format,
+              latestRevisionId: row.latestRevisionId,
+              latestRevisionNumber: row.latestRevisionNumber,
+              documentPath: `/api/cases/${row.caseId}/documents/${encodeURIComponent(row.key)}`,
+            });
+          }
         }
 
         const workProductRows = await db
