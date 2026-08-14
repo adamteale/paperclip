@@ -10,6 +10,7 @@ import {
   heartbeatRuns,
   issueDocuments,
   issueComments,
+  issueThreadInteractions,
   issues,
   pipelineAutomationExecutions,
   pipelineCaseBlockers,
@@ -771,6 +772,52 @@ function readBreakdownConfig(config?: PipelineStageConfig | null): PipelineBreak
     advanceTo: readOptionalStageKey(raw.advanceTo, "Breakdown advanceTo"),
     waitForPieces,
     whenFinishedMoveTo,
+  };
+}
+
+/**
+ * Issue-driven stage gate (`autoAdvanceOnIssue` in stage config).
+ *
+ * Deterministic, config-driven advancement: a stage advances a case when the
+ * issues linked to that case (role `work` by default) satisfy a declared
+ * condition — a status from `statuses`, or an accepted `request_confirmation`
+ * interaction with none still pending. No agents interpret anything; the rule
+ * is evaluated on stage entry (backfill) and by a periodic sweep, mirroring
+ * how `autoAdvanceOnChildrenTerminal` + `maybeAutoAdvanceOnStageEntry` already
+ * cooperate.
+ */
+export interface PipelineIssueGateConfig {
+  toStageKey: string;
+  statuses: string[] | null;
+  interactionAccepted: boolean;
+  roles: string[];
+}
+
+const ISSUE_GATE_ROLES = ["origin", "conversation", "work", "automation"] as const;
+
+export function parseIssueGateConfig(config?: PipelineStageConfig | null): PipelineIssueGateConfig | null {
+  const raw = config?.autoAdvanceOnIssue;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  const toStageKey = readOptionalTrimmedString(record.toStageKey);
+  const statuses = Array.isArray(record.statuses)
+    ? record.statuses
+        .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+        .map((s) => s.trim())
+    : [];
+  const interactionAccepted = record.interactionAccepted === true;
+  const roles = Array.isArray(record.roles)
+    ? record.roles.filter(
+        (r): r is string => typeof r === "string" && (ISSUE_GATE_ROLES as readonly string[]).includes(r),
+      )
+    : [];
+  if (!toStageKey) return null;
+  if (statuses.length === 0 && !interactionAccepted) return null;
+  return {
+    toStageKey,
+    statuses: statuses.length > 0 ? statuses : null,
+    interactionAccepted,
+    roles: roles.length > 0 ? roles : ["work"],
   };
 }
 
@@ -3354,8 +3401,110 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         automationLedgers: input.automationLedgers,
         visitedStageIds: input.autoAdvanceVisitedStageIds,
       });
+      await maybeAutoAdvanceOnIssueLifecycle(tx, {
+        companyId: input.companyId,
+        caseRow: updated,
+        stage: toStage,
+        automationLedgers: input.automationLedgers,
+        visitedStageIds: input.autoAdvanceVisitedStageIds,
+      });
     }
     return { case: updated, event, automationLedger: ledger };
+  }
+
+  /**
+   * Evaluate an `autoAdvanceOnIssue` gate for one case: true when any linked
+   * issue (roles from the rule, links not retired) currently satisfies the
+   * declared conditions. Deterministic — pure DB state, no clock, no agent.
+   */
+  async function issueGateSatisfiedForCase(
+    tx: PipelineDb,
+    input: { companyId: string; caseId: string; rule: PipelineIssueGateConfig },
+  ): Promise<boolean> {
+    const linked = await tx
+      .select({ issueId: pipelineCaseIssueLinks.issueId, status: issues.status })
+      .from(pipelineCaseIssueLinks)
+      .innerJoin(issues, eq(issues.id, pipelineCaseIssueLinks.issueId))
+      .where(
+        and(
+          eq(pipelineCaseIssueLinks.companyId, input.companyId),
+          eq(pipelineCaseIssueLinks.caseId, input.caseId),
+          isNull(pipelineCaseIssueLinks.retiredAt),
+          inArray(pipelineCaseIssueLinks.role, input.rule.roles),
+        ),
+      );
+    if (linked.length === 0) return false;
+
+    if (input.rule.statuses && linked.some((row) => input.rule.statuses!.includes(row.status))) {
+      return true;
+    }
+
+    if (input.rule.interactionAccepted) {
+      const issueIds = linked.map((row) => row.issueId);
+      const interactions = await tx
+        .select({ status: issueThreadInteractions.status })
+        .from(issueThreadInteractions)
+        .where(
+          and(
+            inArray(issueThreadInteractions.issueId, issueIds),
+            eq(issueThreadInteractions.kind, "request_confirmation"),
+          ),
+        );
+      const hasAccepted = interactions.some((row) => row.status === "accepted");
+      const hasPending = interactions.some((row) => row.status === "pending");
+      if (hasAccepted && !hasPending) return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Issue-driven counterpart of `maybeAutoAdvanceOnStageEntry`: when the case's
+   * current stage declares `autoAdvanceOnIssue` and the linked issues already
+   * satisfy it (or satisfy it later, via the sweep), transition. Best-effort by
+   * design — same posture as the children gate: an unsatisfiable target stage
+   * (disabled, missing) must never break the surrounding transition.
+   */
+  async function maybeAutoAdvanceOnIssueLifecycle(
+    tx: PipelineDb,
+    input: {
+      companyId: string;
+      caseRow: typeof pipelineCases.$inferSelect;
+      stage: typeof pipelineStages.$inferSelect;
+      automationLedgers?: Array<typeof pipelineAutomationExecutions.$inferSelect>;
+      visitedStageIds?: Set<string>;
+    },
+  ) {
+    const rule = parseIssueGateConfig(stageConfig(input.stage));
+    if (!rule) return;
+    const visited = input.visitedStageIds ?? new Set<string>();
+    if (visited.has(input.stage.id)) return;
+    const satisfied = await issueGateSatisfiedForCase(tx, {
+      companyId: input.companyId,
+      caseId: input.caseRow.id,
+      rule,
+    });
+    if (!satisfied) return;
+    const toStage = await getStageByKeyOrThrow(tx, input.caseRow.pipelineId, rule.toStageKey);
+    if (toStage.id === input.stage.id) return;
+    visited.add(input.stage.id);
+    try {
+      assertStageEnabled(toStage, "auto_advance");
+      await transitionCaseInTransaction(tx, {
+        companyId: input.companyId,
+        caseId: input.caseRow.id,
+        toStageKey: rule.toStageKey,
+        expectedVersion: input.caseRow.version,
+        actor: { type: "system" },
+        transitionClass: "auto",
+        reason: "issue_lifecycle",
+        automationLedgers: input.automationLedgers,
+        autoAdvanceVisitedStageIds: visited,
+      });
+    } catch {
+      // Best-effort: an unsatisfied gate (drift, approval) on the chained
+      // transition is recorded by the transition machinery itself.
+    }
   }
 
   // A case can enter an auto-advance stage after its children are already
@@ -4433,6 +4582,63 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         });
         return updated!;
       });
+    },
+
+    /**
+     * Periodic convergence pass for `autoAdvanceOnIssue` gates: re-evaluates
+     * every non-terminal case sitting on a stage with an issue gate and
+     * advances the ones whose linked issues now satisfy the rule. This is the
+     * safety net that makes the feature deterministic even when the issue
+     * changed long after the case entered the stage (no event bus, no hooks —
+     * same posture as the children-terminal entry backfill).
+     */
+    async sweepIssueGateCases(): Promise<{ evaluated: number; advanced: number }> {
+      const candidates = await db
+        .select({
+          caseRow: pipelineCases,
+          stage: pipelineStages,
+        })
+        .from(pipelineCases)
+        .innerJoin(pipelineStages, eq(pipelineStages.id, pipelineCases.stageId))
+        .where(
+          and(
+            isNull(pipelineCases.terminalKind),
+            isNotNull(pipelineCases.stageId),
+            sql`${pipelineStages.config} -> 'autoAdvanceOnIssue' is not null`,
+          ),
+        );
+
+      let advanced = 0;
+      for (const row of candidates) {
+        if (!parseIssueGateConfig(stageConfig(row.stage))) continue;
+        try {
+          const result = await db.transaction(async (tx) => {
+            const fresh = await tx
+              .select()
+              .from(pipelineCases)
+              .where(eq(pipelineCases.id, row.caseRow.id))
+              .limit(1)
+              .then((rows) => rows[0] ?? null);
+            if (!fresh || fresh.terminalKind || fresh.stageId !== row.stage.id) return false;
+            await maybeAutoAdvanceOnIssueLifecycle(tx, {
+              companyId: fresh.companyId,
+              caseRow: fresh,
+              stage: row.stage,
+            });
+            const after = await tx
+              .select({ stageId: pipelineCases.stageId })
+              .from(pipelineCases)
+              .where(eq(pipelineCases.id, fresh.id))
+              .limit(1)
+              .then((rows) => rows[0] ?? null);
+            return after !== null && after.stageId !== row.stage.id;
+          });
+          if (result) advanced += 1;
+        } catch {
+          // Best-effort per case: a failing candidate must not abort the sweep.
+        }
+      }
+      return { evaluated: candidates.length, advanced };
     },
 
     async transitionCase(input: {
