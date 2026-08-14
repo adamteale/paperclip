@@ -74,6 +74,7 @@ describeEmbeddedPostgres("pipelineService", () => {
     await db.delete(activityLog);
     await db.delete(routineRuns);
     await db.delete(heartbeatRuns);
+    await db.delete(issueThreadInteractions);
     await db.delete(issues);
     await db.delete(executionWorkspaces);
     await db.delete(routines);
