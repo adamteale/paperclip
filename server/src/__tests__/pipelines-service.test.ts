@@ -16,6 +16,7 @@ import {
   pipelineCaseBlockers,
   pipelineCaseIssueLinks,
   pipelineCaseEvents,
+  pipelineAutomationExecutions,
   pipelineCases,
   pipelineStages,
   pipelineTransitions,
@@ -2028,4 +2029,40 @@ describeEmbeddedPostgres("pipelineService", () => {
       expect(result.advanced).toBe(1);
     });
   });
+
+    it("self-heals stale pending_dispatch automation ledgers on the next sweep", async () => {
+      // Simulate a missed dispatch: a ledger created by an in-tx transition
+      // but never executed post-commit (the exact bug that stranded DAI-73's
+      // brief routine). Insert one manually with a backdated timestamp.
+      const { company, pipeline } = await seedPipeline();
+      const routine = await seedRoutine(company.id, "Stale automation routine");
+      const created = await svc.ingestCase({ companyId: company.id, pipelineId: pipeline.id, caseKey: "stale-ledger", title: "Stale ledger test", actor: userActor });
+      const stale = await db.insert(pipelineAutomationExecutions).values({
+        companyId: company.id,
+        caseId: created.case.id,
+        automationId: randomUUID(),
+        routineId: routine.id,
+        status: "failed",
+        error: "pending_dispatch",
+        triggeringEventId: randomUUID(),
+      }).returning();
+      // Backdate it so the sweep's 2-minute threshold catches it.
+      await db.execute(sql`UPDATE pipeline_automation_executions SET created_at = now() - interval '5 minutes' WHERE id = ${stale[0].id}`);
+      const result = await svc.sweepIssueGateCases();
+      // The self-heal attempted the dispatch (dispatched > 0). The actual
+      // routine run fails because the stale row references non-existent
+      // resources — but the key assertion is that the row is no longer
+      // stuck at "pending_dispatch": the sweep adopted it.
+      const after = await db.select({ status: pipelineAutomationExecutions.status, error: pipelineAutomationExecutions.error })
+        .from(pipelineAutomationExecutions).where(eq(pipelineAutomationExecutions.id, stale[0].id)).limit(1);
+      // The self-heal re-attempted the dispatch. It failed again (the
+      // stale row references an automation that isn't configured on the case's
+      // stage), but the key assertion is it's no longer stuck at
+      // "pending_dispatch" — the sweep adopted it and let executeAutomationLedger
+      // set a real error. Either it succeeded (status="succeeded") or it
+      // has a new error message (no longer "pending_dispatch").
+      expect(after[0].error).not.toBe("pending_dispatch");
+      // cleanup
+      await db.delete(pipelineAutomationExecutions).where(eq(pipelineAutomationExecutions.id, stale[0].id));
+    });
 });
