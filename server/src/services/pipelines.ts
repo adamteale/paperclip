@@ -1547,6 +1547,34 @@ async function writeCaseEvent(
       payload: input.payload ?? {},
     })
     .returning();
+
+  // Mirror pipeline case events into the company activity log so live-update
+  // clients (LiveUpdatesProvider websocket) can invalidate pipeline queries —
+  // the same mechanism that keeps the Issues screen fresh. Without this, case
+  // transitions/claims/reviews land only in pipeline_case_events and the
+  // Pipelines board requires a manual refresh. Best-effort by design: activity
+  // mirroring must never break the case event itself.
+  try {
+    const actor = eventActorPatch(input.actor);
+    await logActivity(db as Db, {
+      companyId: input.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorAgentId ?? actor.actorUserId ?? "system",
+      agentId: actor.actorAgentId ?? null,
+      runId: actor.runId ?? null,
+      action: `pipeline.case_${input.type}`,
+      entityType: "pipeline_case",
+      entityId: input.caseId,
+      details: {
+        fromStageId: input.fromStageId ?? null,
+        toStageId: input.toStageId ?? null,
+        ...(input.payload ?? {}),
+      },
+    });
+  } catch {
+    // best-effort — see comment above
+  }
+
   return event!;
 }
 

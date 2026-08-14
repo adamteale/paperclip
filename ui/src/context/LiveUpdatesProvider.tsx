@@ -1284,6 +1284,14 @@ function invalidateActivityQueries(
     }
   }
 
+  if (entityType === "pipeline_case") {
+    // Pipeline board + case-detail queries share the ["pipelines"] key prefix;
+    // one invalidation refreshes lists, board cases, per-case detail panes,
+    // events, and health when a case transitions/claims/reviews/links. Same
+    // event-sourced pattern the Issues screen relies on (issue 9627).
+    queryClient.invalidateQueries({ queryKey: ["pipelines"] });
+  }
+
   if (entityType === "issue") {
     if (action === "issue.tree_hold_created" || action === "issue.tree_hold_released" || action === "issue.updated") {
       // An ancestor hold or reparenting changes descendants' effective pause.
