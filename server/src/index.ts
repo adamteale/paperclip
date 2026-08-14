@@ -59,6 +59,7 @@ import {
   reconcileCodexLocalManagedHomesOnStartup,
   reconcilePersistedRuntimeServicesOnStartup,
   routineService,
+  pipelineService,
   statusCardService,
   toolAccessService,
 } from "./services/index.js";
@@ -989,6 +990,20 @@ export async function startServer(): Promise<StartedServer> {
           logger.error({ err }, "merged pull-request confirmation sweep failed");
         }));
     };
+    const pipelineGateSweeper = pipelineService(db as any);
+    const schedulePipelineIssueGateSweep = () => {
+      if (heartbeatSchedulerStopped) return;
+      trackHeartbeatSchedulerWork(pipelineGateSweeper
+        .sweepIssueGateCases()
+        .then((result) => {
+          if (result.advanced > 0) {
+            logger.info(result, "pipeline issue-gate sweep advanced cases");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "pipeline issue-gate sweep failed");
+        }));
+    };
     const scheduleTerminalWorkspaceSweep = () => {
       if (heartbeatSchedulerStopped) return;
       trackHeartbeatSchedulerWork(terminalWorkspaces
@@ -1187,6 +1202,7 @@ export async function startServer(): Promise<StartedServer> {
         if (heartbeatSchedulerStopped) return;
         scheduleMergedPullRequestConfirmationSweep();
         scheduleTerminalWorkspaceSweep();
+        schedulePipelineIssueGateSweep();
 
         if (heartbeatSchedulerStopped) return;
         trackHeartbeatSchedulerWork(routines

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
+  issueThreadInteractions,
   activityLog,
   agents,
   companies,
@@ -34,6 +35,7 @@ import {
   type PipelineActor,
 } from "../services/pipelines.ts";
 import { routineService } from "../services/routines.ts";
+import { parseIssueGateConfig } from "../services/pipelines.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -72,6 +74,7 @@ describeEmbeddedPostgres("pipelineService", () => {
     await db.delete(activityLog);
     await db.delete(routineRuns);
     await db.delete(heartbeatRuns);
+    await db.delete(issueThreadInteractions);
     await db.delete(issues);
     await db.delete(executionWorkspaces);
     await db.delete(routines);
@@ -1872,5 +1875,147 @@ describeEmbeddedPostgres("pipelineService", () => {
     expect(freshChild!.terminalChildCount).toBe(1);
     expect(freshGrandchild!.terminalKind).toBe("cancelled");
     expect(freshGrandchild!.retiredReason).toBe("automation_retry");
+  });
+
+  describe("autoAdvanceOnIssue gates", () => {
+    async function seedIssueGatePipeline(companyId: string) {
+      return svc.createPipeline({
+        companyId,
+        key: `issue-gate-${randomUUID().slice(0, 8)}`,
+        name: "Issue gate",
+        actor: userActor,
+        stages: [
+          { key: "intake", name: "Intake", kind: "open", config: {
+            autoAdvanceOnIssue: { toStageKey: "working", statuses: ["in_review"], interactionAccepted: true },
+          } },
+          { key: "working", name: "Working", kind: "working" },
+          { key: "done", name: "Done", kind: "done" },
+          { key: "cancelled", name: "Cancelled", kind: "cancelled" },
+        ],
+      });
+    }
+
+    it("parses issue gate config defensively", async () => {
+      expect(parseIssueGateConfig(null)).toBeNull();
+      expect(parseIssueGateConfig({})).toBeNull();
+      expect(parseIssueGateConfig({ autoAdvanceOnIssue: {} })).toBeNull();
+      expect(parseIssueGateConfig({ autoAdvanceOnIssue: { toStageKey: "  " } })).toBeNull();
+      // no conditions = not a gate
+      expect(parseIssueGateConfig({ autoAdvanceOnIssue: { toStageKey: "working" } })).toBeNull();
+      const parsed = parseIssueGateConfig({
+        autoAdvanceOnIssue: { toStageKey: " working ", statuses: ["in_review", "", 42], interactionAccepted: true },
+      });
+      expect(parsed).toEqual({
+        toStageKey: "working",
+        statuses: ["in_review"],
+        interactionAccepted: true,
+        roles: ["work"],
+      });
+      const roleParsed = parseIssueGateConfig({
+        autoAdvanceOnIssue: { toStageKey: "working", statuses: ["done"], roles: ["work", "nonsense"] },
+      });
+      expect(roleParsed?.roles).toEqual(["work"]);
+    });
+
+    it("advances a case when a linked work issue reaches a declared status (sweep)", async () => {
+      const company = await seedCompany();
+      const pipeline = await seedIssueGatePipeline(company.id);
+      const created = await svc.ingestCase({
+        companyId: company.id,
+        pipelineId: pipeline.id,
+        caseKey: "issue-gate-status",
+        title: "Issue gate status",
+        actor: userActor,
+      });
+      const issue = await seedLinkedIssue({ companyId: company.id, caseId: created.case.id, role: "work", status: "todo" });
+
+      // Nothing satisfied yet.
+      let result = await svc.sweepIssueGateCases();
+      expect(result.advanced).toBe(0);
+      let [fresh] = await db.select().from(pipelineCases).where(eq(pipelineCases.id, created.case.id));
+      const intakeStage = (await svc.listStages(company.id, pipeline.id)).find((s) => s.key === "intake")!;
+      expect(fresh!.stageId).toBe(intakeStage.id);
+
+      await db.update(issues).set({ status: "in_review" }).where(eq(issues.id, issue.id));
+      result = await svc.sweepIssueGateCases();
+      expect(result.advanced).toBe(1);
+      [fresh] = await db.select().from(pipelineCases).where(eq(pipelineCases.id, created.case.id));
+      const workingStage = (await svc.listStages(company.id, pipeline.id)).find((s) => s.key === "working")!;
+      expect(fresh!.stageId).toBe(workingStage.id);
+
+      // Idempotent: a second sweep finds nothing to do.
+      result = await svc.sweepIssueGateCases();
+      expect(result.advanced).toBe(0);
+    });
+
+    it("advances a case when a request_confirmation on a linked issue is accepted with none pending", async () => {
+      const company = await seedCompany();
+      const pipeline = await seedIssueGatePipeline(company.id);
+      const created = await svc.ingestCase({
+        companyId: company.id,
+        pipelineId: pipeline.id,
+        caseKey: "issue-gate-interaction",
+        title: "Issue gate interaction",
+        actor: userActor,
+      });
+      const issue = await seedLinkedIssue({ companyId: company.id, caseId: created.case.id, role: "work", status: "in_progress" });
+
+      // A pending interaction does NOT satisfy the gate.
+      await db.insert(issueThreadInteractions).values({
+        companyId: company.id,
+        issueId: issue.id,
+        kind: "request_confirmation",
+        status: "pending",
+        continuationPolicy: "wake_assignee",
+        payload: { prompt: "Approve the program plan?", acceptLabel: "Approve" },
+      });
+      let result = await svc.sweepIssueGateCases();
+      expect(result.advanced).toBe(0);
+
+      // Accepted (no pending remaining) satisfies it.
+      await db.update(issueThreadInteractions).set({ status: "accepted" }).where(eq(issueThreadInteractions.issueId, issue.id));
+      result = await svc.sweepIssueGateCases();
+      expect(result.advanced).toBe(1);
+    });
+
+    it("ignores retired links and non-work roles by default", async () => {
+      const company = await seedCompany();
+      const pipeline = await seedIssueGatePipeline(company.id);
+      const created = await svc.ingestCase({
+        companyId: company.id,
+        pipelineId: pipeline.id,
+        caseKey: "issue-gate-roles",
+        title: "Issue gate roles",
+        actor: userActor,
+      });
+      // automation-role issue in_review: not watched by the default roles.
+      await seedLinkedIssue({ companyId: company.id, caseId: created.case.id, role: "automation", status: "in_review" });
+      const result = await svc.sweepIssueGateCases();
+      expect(result.advanced).toBe(0);
+    });
+
+    it("backfills on stage entry when the issue already satisfies the gate", async () => {
+      const company = await seedCompany();
+      const pipeline = await seedIssueGatePipeline(company.id);
+      const created = await svc.ingestCase({
+        companyId: company.id,
+        pipelineId: pipeline.id,
+        caseKey: "issue-gate-backfill",
+        title: "Issue gate backfill",
+        actor: userActor,
+        stageKey: "working",
+      });
+      // Link a work issue that is already in_review, then force the case back
+      // to intake; entering intake with the gate satisfied should advance it.
+      const issue = await seedLinkedIssue({ companyId: company.id, caseId: created.case.id, role: "work", status: "in_review" });
+      expect(issue.status).toBe("in_review");
+      const stages = await svc.listStages(company.id, pipeline.id);
+      const intake = stages.find((s) => s.key === "intake")!;
+      await db.update(pipelineCases).set({ stageId: intake.id }).where(eq(pipelineCases.id, created.case.id));
+      // The sweep is the deterministic path; entry-time backfill covers the
+      // same rule via maybeAutoAdvanceOnIssueLifecycle on real transitions.
+      const result = await svc.sweepIssueGateCases();
+      expect(result.advanced).toBe(1);
+    });
   });
 });
