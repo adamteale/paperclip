@@ -85,30 +85,37 @@ export async function backfillPrincipalAccessCompatibility(
     .from(agents)
     .where(notInArray(agents.status, ["pending_approval", "terminated"]));
 
-  const agentMembershipsInserted = nonTerminalAgents.length > 0
-    ? await db
-      .insert(companyMemberships)
-      .values(
-        nonTerminalAgents.map((agent) => ({
-          companyId: agent.companyId,
-          principalType: "agent",
-          principalId: agent.principalId,
-          status: "active",
-          membershipRole: "member",
-          createdAt: now,
-          updatedAt: now,
-        })),
-      )
-      .onConflictDoNothing({
-        target: [
-          companyMemberships.companyId,
-          companyMemberships.principalType,
-          companyMemberships.principalId,
-        ],
-      })
-      .returning({ id: companyMemberships.id })
-      .then((rows) => rows.length)
-    : 0;
+  let agentMembershipsInserted = 0;
+  try {
+    agentMembershipsInserted = nonTerminalAgents.length > 0
+      ? await db
+        .insert(companyMemberships)
+        .values(
+          nonTerminalAgents.map((agent) => ({
+            companyId: agent.companyId,
+            principalType: "agent",
+            principalId: agent.principalId,
+            status: "active",
+            membershipRole: "member",
+            createdAt: now,
+            updatedAt: now,
+          })),
+        )
+        .onConflictDoNothing({
+          target: [
+            companyMemberships.companyId,
+            companyMemberships.principalType,
+            companyMemberships.principalId,
+          ],
+        })
+        .returning({ id: companyMemberships.id })
+        .then((rows) => rows.length)
+      : 0;
+  } catch (e) {
+    // Orphaned agents (company_id doesn't exist) cause FK violation.
+    // Log + continue — the orphaned data should be cleaned up after startup.
+    console.warn("[backfillPrincipalAccessCompatibility] Agent membership insert failed (non-fatal):", (e as Error).message?.slice(0, 200));
+  }
 
   const activeHumanMemberships = await db
     .select({

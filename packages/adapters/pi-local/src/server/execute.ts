@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,6 +51,7 @@ import { shellQuote } from "@paperclipai/adapter-utils/ssh";
 import { isPiUnknownSessionError, parsePiJsonl } from "./parse.js";
 import { ensurePiModelConfiguredAndAvailable } from "./models.js";
 import { preparePiRuntimeConfig } from "./runtime-config.js";
+import { writePluginToolExtension, sanitizeToolName } from "./plugin-tool-extension.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -213,6 +215,62 @@ async function readSavedSessionCwd(input: {
   }
 }
 
+/** Built-in Pi tools the pi_local adapter exposes by default. */
+export const BASE_PI_TOOLS =
+  "read,bash,edit,write,grep,find,ls,subagent,subagent_done,caller_ping,superpowers_plan_review,superpowers_spec_review,memory,skill_manage,session_search,memory_search,knowledge_search,kb_read,mcp,ollama_web_search,ollama_web_fetch";
+
+export interface BuildArgsOptions {
+  /** Path to a generated plugin-tool extension file, if plugin tools are present. */
+  extensionPath?: string;
+  /** Plugin tool names to append to the `--tools` allowlist (pi filters tools not in it). */
+  pluginToolNames?: string[];
+  superagentsExtPath?: string;
+  renderedSystemPromptExtension: string;
+  provider: string | null;
+  modelId: string | null;
+  thinking: string;
+  skillsDir: string;
+  extraArgs: string[];
+  userPrompt: string;
+}
+
+/**
+ * Build the pi CLI argument list for a run. `--tools` is an allowlist that
+ * applies to built-in AND custom/extension tools, so plugin tool names must be
+ * appended to it or pi filters them out.
+ */
+export function buildArgs(sessionFile: string, opts: BuildArgsOptions): string[] {
+  const args: string[] = [];
+
+  // Use JSON mode for structured output with print mode (non-interactive)
+  args.push("--mode", "json");
+  args.push("-p"); // Non-interactive mode: process prompt and exit
+
+  // Use --append-system-prompt to extend Pi's default system prompt
+  args.push("--append-system-prompt", opts.renderedSystemPromptExtension);
+
+  if (opts.provider) args.push("--provider", opts.provider);
+  if (opts.modelId) args.push("--model", opts.modelId);
+  if (opts.thinking) args.push("--thinking", opts.thinking);
+
+  const tools =
+    opts.pluginToolNames && opts.pluginToolNames.length > 0
+      ? `${BASE_PI_TOOLS},${opts.pluginToolNames.join(",")}`
+      : BASE_PI_TOOLS;
+  args.push("--tools", tools);
+  if (opts.extensionPath) args.push("--extension", opts.extensionPath);
+  if (opts.superagentsExtPath) args.push("-e", opts.superagentsExtPath);
+  args.push("--session", sessionFile);
+  args.push("--skill", opts.skillsDir);
+
+  if (opts.extraArgs.length > 0) args.push(...opts.extraArgs);
+
+  // Add the user prompt as the last argument
+  args.push(opts.userPrompt);
+
+  return args;
+}
+
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
   const executionTarget = readAdapterExecutionTarget({
@@ -264,7 +322,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   // Build environment
   const envConfig = parseObject(config.env);
-  const env: Record<string, string> = { ...buildPaperclipEnv(agent) };
+  const hasExplicitApiKey =
+    typeof envConfig.PAPERCLIP_API_KEY === "string" && envConfig.PAPERCLIP_API_KEY.trim().length > 0;
+  const projectId = asString(context.projectId, "");
+  const env: Record<string, string> = { ...buildPaperclipEnv(agent, projectId) };
   env.PAPERCLIP_RUN_ID = runId;
 
   const wakeTaskId =
@@ -395,6 +456,30 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       if (fromExtraArgs.length > 0) return fromExtraArgs;
       return asStringArray(config.args);
     })();
+    // Generate the pi extension that exposes plugin-registered tools to the
+    // agent, and collect the tool names so the --tools allowlist can include
+    // them (pi otherwise filters custom/extension tools out).
+// pi-superagents extension: PI_CODING_AGENT_DIR is the agent config dir
+    // where fix-subagents.sh installed extensions/pi-superagents.
+    const piAgentDir = localAgentConfigDir || process.env.PI_CODING_AGENT_DIR || "";
+    const superagentsExtPath = piAgentDir
+      ? path.join(piAgentDir, "extensions", "pi-superagents")
+      : "";
+        const pluginTools = ctx.pluginTools ?? [];
+    // --tools allowlists the SANITIZED names (must match the names the extension
+    // registers; LLM providers reject namespaced names like "paperclip.create_pr").
+    const pluginToolNames = pluginTools.map((tool) => sanitizeToolName(tool.name));
+    let pluginToolsLocalDir: string | null = null;
+    let extensionPath: string | undefined;
+    if (pluginTools.length > 0) {
+      pluginToolsLocalDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-pi-plugin-tools-"));
+      try {
+        extensionPath = await writePluginToolExtension(pluginTools, pluginToolsLocalDir);
+      } catch (error) {
+        await fs.rm(pluginToolsLocalDir, { recursive: true, force: true }).catch(() => undefined);
+        throw error;
+      }
+    }
     let restoreRemoteWorkspace: (() => Promise<void>) | null = null;
     let remoteRuntimeRootDir: string | null = null;
     let localSkillsDir: string | null = null;
@@ -430,6 +515,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 localDir: localAgentConfigDir,
               }]
               : []),
+            ...(pluginToolsLocalDir
+              ? [{
+                key: "pluginTools",
+                localDir: pluginToolsLocalDir,
+              }]
+              : []),
           ],
         });
         restoreRemoteWorkspace = () =>
@@ -453,6 +544,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         }
         remoteRuntimeRootDir = preparedRemoteRuntime.runtimeRootDir;
         remoteSkillsDir = preparedRemoteRuntime.assetDirs.skills ?? null;
+        if (pluginToolsLocalDir && preparedRemoteRuntime.assetDirs.pluginTools) {
+          extensionPath = path.posix.join(preparedRemoteRuntime.assetDirs.pluginTools, "plugin-tools.mjs");
+        }
         if (localAgentConfigDir && preparedRemoteRuntime.assetDirs.agentConfig) {
           env.PI_CODING_AGENT_DIR = preparedRemoteRuntime.assetDirs.agentConfig;
         }
@@ -460,6 +554,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         await Promise.allSettled([
           restoreRemoteWorkspace?.(),
           localSkillsDir ? fs.rm(path.dirname(localSkillsDir), { recursive: true, force: true }).catch(() => undefined) : Promise.resolve(),
+          pluginToolsLocalDir ? fs.rm(pluginToolsLocalDir, { recursive: true, force: true }).catch(() => undefined) : Promise.resolve(),
         ]);
         throw error;
       }
@@ -640,34 +735,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       return notes;
     })();
 
-    const buildArgs = (sessionFile: string): string[] => {
-      const args: string[] = [];
-
-      // Use JSON mode for structured output with print mode (non-interactive)
-      args.push("--mode", "json");
-      args.push("-p"); // Non-interactive mode: process prompt and exit
-
-      // Use --append-system-prompt to extend Pi's default system prompt
-      args.push("--append-system-prompt", renderedSystemPromptExtension);
-
-      if (provider) args.push("--provider", provider);
-      if (modelId) args.push("--model", modelId);
-      if (thinking) args.push("--thinking", thinking);
-
-      args.push("--tools", "read,bash,edit,write,grep,find,ls");
-      args.push("--session", sessionFile);
-      args.push("--skill", remoteSkillsDir ?? PI_AGENT_SKILLS_DIR);
-
-      if (extraArgs.length > 0) args.push(...extraArgs);
-
-      // Add the user prompt as the last argument
-      args.push(userPrompt);
-
-      return args;
-    };
-
     const runAttempt = async (sessionFile: string) => {
-      const args = buildArgs(sessionFile);
+      const args = buildArgs(sessionFile, {
+        superagentsExtPath: superagentsExtPath && existsSync(superagentsExtPath) ? superagentsExtPath : undefined,
+        extensionPath,
+        pluginToolNames,
+        renderedSystemPromptExtension,
+        provider,
+        modelId,
+        thinking,
+        skillsDir: remoteSkillsDir ?? PI_AGENT_SKILLS_DIR,
+        extraArgs,
+        userPrompt,
+      });
       if (onMeta) {
         await onMeta({
           adapterType: "pi_local",
@@ -839,6 +919,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         paperclipBridge?.stop(),
         restoreRemoteWorkspace?.(),
         localSkillsDir ? fs.rm(path.dirname(localSkillsDir), { recursive: true, force: true }).catch(() => undefined) : Promise.resolve(),
+        pluginToolsLocalDir ? fs.rm(pluginToolsLocalDir, { recursive: true, force: true }).catch(() => undefined) : Promise.resolve(),
       ]);
     }
   } finally {

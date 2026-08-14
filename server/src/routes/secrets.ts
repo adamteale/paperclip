@@ -377,6 +377,15 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
     });
   });
 
+  router.get("/companies/:companyId/secrets/:secretId/resolve", async (req, res) => {
+    assertBoard(req);
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const value = await svc.resolveSecretValue(companyId, req.params.secretId as string, "latest");
+    res.set("Cache-Control", "no-store");
+    res.json({ value });
+  });
+
   router.get("/companies/:companyId/secret-providers", (req, res) => {
     assertBoard(req);
     const companyId = req.params.companyId as string;
@@ -1139,6 +1148,50 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
     });
 
     res.json({ ok: true });
+  });
+
+
+  // Create a company_secret_binding (links a secret to a plugin/agent target).
+  // No REST API existed for this — plugins can't write to public.* via ctx.db.
+  router.post("/companies/:companyId/secret-bindings", async (req, res) => {
+    const { companyId } = req.params;
+    const { secretId, targetType = "plugin", targetId, configPath, required = true } = req.body ?? {};
+    if (!secretId || !targetId || !configPath) {
+      res.status(400).json({ error: "secretId, targetId, configPath required" });
+      return;
+    }
+    try {
+      await db.$client`
+        INSERT INTO company_secret_bindings (company_id, secret_id, target_type, target_id, config_path, required)
+        VALUES (${companyId}, ${secretId}, ${targetType}, ${targetId}, ${configPath}, ${required})
+        ON CONFLICT DO NOTHING
+      `;
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(500).json({ error: String((e as Error)?.message ?? e) });
+    }
+  });
+
+
+  // Create a company_secret_binding (links a secret to a plugin/agent target).
+  // No REST API existed for this — plugins can't write to public.* via ctx.db.
+  router.post("/companies/:companyId/secret-bindings", async (req, res) => {
+    const { companyId } = req.params;
+    const { secretId, targetType = "plugin", targetId, configPath, required = true } = req.body ?? {};
+    if (!secretId || !targetId || !configPath) {
+      res.status(400).json({ error: "secretId, targetId, configPath required" });
+      return;
+    }
+    try {
+      await db.$client`
+        INSERT INTO company_secret_bindings (company_id, secret_id, target_type, target_id, config_path, required)
+        VALUES (${companyId}, ${secretId}, ${targetType}, ${targetId}, ${configPath}, ${required})
+        ON CONFLICT DO NOTHING
+      `;
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(500).json({ error: String((e as Error)?.message ?? e) });
+    }
   });
 
   return router;

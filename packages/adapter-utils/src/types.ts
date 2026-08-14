@@ -167,12 +167,42 @@ export interface AdapterRuntimeEvent {
   payload?: Record<string, unknown>;
 }
 
+/**
+ * A plugin-registered tool exposed to the agent at execution time.
+ *
+ * This is a structural duplicate of the server-side `AgentToolDescriptor`
+ * (server/src/services/plugin-tool-dispatcher.ts). It lives here so
+ * adapters can consume the shape without importing from the server package
+ * (which would create a server → adapter-utils → server import cycle).
+ */
+export interface AdapterPluginToolDescriptor {
+  /** Fully namespaced tool name (e.g. `"acme.linear:search-issues"`). */
+  name: string;
+  /** Human-readable display name. */
+  displayName: string;
+  /** Description for the agent — explains when and how to use this tool. */
+  description: string;
+  /** JSON Schema describing the tool's input parameters. */
+  parametersSchema: Record<string, unknown>;
+  /** The plugin that provides this tool. */
+  pluginId: string;
+}
+
 export interface AdapterExecutionContext {
   runId: string;
   agent: AdapterAgent;
   runtime: AdapterRuntime;
   config: Record<string, unknown>;
   context: Record<string, unknown>;
+  /**
+   * Plugin-registered tools to expose to the agent.
+   *
+   * Populated by the heartbeat service from the plugin tool dispatcher;
+   * adapters (e.g. pi-local) turn these into concrete agent tools.
+   * Empty/undefined when no plugin tools are registered or the plugin
+   * system is disabled.
+   */
+  pluginTools?: AdapterPluginToolDescriptor[];
   runtimeCommandSpec?: AdapterRuntimeCommandSpec | null;
   executionTarget?: AdapterExecutionTarget | null;
   /**

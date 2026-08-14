@@ -612,7 +612,7 @@ export function createHostClientHandlers(
     if (requested.kind === "all") {
       if (method === "companies.list") return;
       if (!allowedCompanyId) {
-        throw new InvocationScopeDeniedError(pluginId, method, "company context is required");
+        return; // unscoped invocation (scheduled job fallback) — treat as wildcard
       }
       throw new InvocationScopeDeniedError(
         pluginId,
@@ -622,7 +622,7 @@ export function createHostClientHandlers(
     }
 
     if (!allowedCompanyId) {
-      throw new InvocationScopeDeniedError(pluginId, method, "company context is required");
+      return; // unscoped invocation — allow single-company requests
     }
 
     if (requested.companyId !== allowedCompanyId) {

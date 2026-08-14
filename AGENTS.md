@@ -1,188 +1,163 @@
-# AGENTS.md
+# TenX — Agent Instructions
 
-Guidance for human and AI contributors working in this repository.
+> **Precedence:** user instructions (direct requests) > this AGENTS.md > spec/contracts under `docs/superpowers/specs/` and `contracts/` > default system prompt.
 
-## 1. Purpose
+This repo provisions an always-on **Paperclip Agent Company** platform. Paperclip handles orchestration, delegating to Pi (`pi_local`) for execution.
 
-Paperclip is a control plane for AI-agent companies.
-The current implementation target is V1 and is defined in `doc/SPEC-implementation.md`.
+## Platform Architecture — The Big Picture
 
-## 2. Read This First
+TenX builds an autonomous software factory: AI agents that take a product brief and deliver a deployed application — design, code, tests, PRs, and production deployment — with human review at key gates.
 
-Before making changes, read in this order:
+### How the pieces fit together
 
-1. `doc/GOAL.md`
-2. `doc/PRODUCT.md`
-3. `doc/SPEC-implementation.md`
-4. `doc/DEVELOPING.md`
-5. `doc/DATABASE.md`
-
-`doc/SPEC.md` is long-horizon product context.
-`doc/SPEC-implementation.md` is the concrete V1 build contract.
-
-## 3. Repo Map
-
-- `server/`: Express REST API and orchestration services
-- `ui/`: React + Vite board UI
-- `packages/db/`: Drizzle schema, migrations, DB clients
-- `packages/shared/`: shared types, constants, validators, API path constants
-- `packages/adapters/`: agent adapter implementations (Claude, Codex, Cursor, etc.)
-- `packages/adapter-utils/`: shared adapter utilities
-- `packages/plugins/`: plugin system packages
-- `packages/skills-catalog/`: app-shipped skills catalog (`@paperclipai/skills-catalog`)
-- `packages/teams-catalog/`: app-shipped teams catalog (`@paperclipai/teams-catalog`)
-- `cli/`: `paperclipai` CLI package (published bin, agent-facing commands)
-- `skills/`: Paperclip runtime/operational skills (not part of the app catalog)
-- `doc/`: operational and product docs
-
-## 4. Dev Setup (Auto DB)
-
-Use embedded PGlite in dev by leaving `DATABASE_URL` unset.
-
-```sh
-pnpm install
-pnpm dev
+```
+Provisioning Wizard ──generates──> Company (agents, projects, repos, graphs)
+       │
+       └──> Workflow Engine ──drives──> Pipeline (design → build → deploy)
+              │
+              ├── Architect: single source of truth, creates contracts, decomposes work
+              ├── Coder: dispatches sp-implementer sub-agents for parallel building
+              ├── Designer: creates mockups via Open Design
+              ├── QA: reviews against quality guidelines
+              └── Hindsight: persistent memory across all agent runs
 ```
 
-This starts:
+### The Architect is the brain
 
-- API: `http://localhost:3100`
-- UI: `http://localhost:3100` (served by API server in dev middleware mode)
+The Architect holds the big picture: what services exist, how they connect, what credentials are in use. Before decomposing work, the Architect creates an **integration contract** document defining API endpoints, data models, auth flow, and integration wiring. This contract is the single source of truth that ensures independently-built pieces (frontend pages, backend services) connect coherently.
 
-Quick checks:
+### The workflow graph provides structure
 
-```sh
-curl http://localhost:3100/api/health
-curl http://localhost:3100/api/companies
+Every project has a pipeline graph with nodes for each step (design, code, QA, review, deploy). The graph enforces quality gates — work can't advance until checks pass. Multiple **entry points** allow different work types: features go through the full design pipeline, bugs skip straight to investigation and fix.
+
+### Sub-agents provide parallelism within a single task
+
+The Coder uses `sp-implementer` sub-agents (via the `subagent` tool) to build independent subtasks in parallel within a single heartbeat. This is complementary to Paperclip's concurrent heartbeats (which parallelize across different issues).
+
+### Hindsight provides persistent memory
+
+Every agent gets Hindsight recall at run start and auto-retains comments. The company-level bank (`['company']` granularity) shares memory across all agents — the Architect's knowledge is available to the Coder, QA, etc. Agents call `hindsight_recall` to surface relevant context and `hindsight_retain` to store discoveries.
+
+### Production deployment is part of the pipeline
+
+The `deploy_production` node deploys to permanent subdomains (`{companySlug}.robotpants.ddns.net`) via Docker containers behind Caddy. The pipeline doesn't stop at preview — it goes all the way to a live production URL.
+
+### Key design principles
+
+1. **The contract is the glue** — if the contract is right, everything downstream works. If it's wrong, everything is wrong.
+2. **Smaller outputs are better** — sub-agent dispatch produces small, verifiable chunks instead of one massive build.
+3. **The graph is the tool, not the brain** — the graph provides structure and quality gates. The Architect provides intelligence and routing.
+4. **Memory persists** — Hindsight ensures agents don't start from scratch each run. Decisions and discoveries accumulate.
+
+## Essential Reading (in order)
+
+1. **`docs/guides/operational-runbook.md`** — THE single source of truth. Server access, agent execution, fan-out, circuit breaker, OD integration, zeroing/restoring, plugin deployment, known SDK issues. Start here.
+2. **`docs/guides/gotchas.md`** — every trap, pitfall, + lesson learned. READ THIS before any work.
+3. **`docs/guides/zero-and-restore.md`** — How to zero a company and restore the wizard draft. NEVER DELETE wizard sessions.
+4. **`docs/guides/gcp-gemini-brownfield-setup.md`** — Quick reference for GCP + Gemini + brownfield + integrations.
+5. **`docs/guides/troubleshooting.md`** — Every bug, fix, and lesson learned by category.
+6. **`docs/superpowers/specs/2026-07-29-post-design-fanout-design.md`** — The next feature to implement: parallel frontend coding via post-design fan-out.
+7. `docs/guides/platform-overview.md` — What TenX is and how the layers fit.
+8. `docs/plugins/` — Plugin reference docs (workflow-engine, jira-bridge, od-bridge, company-defaults, provisioning-wizard, etc.)
+
+## Server
+
+- **ASUS NUC (home):** `ssh test@100.112.32.2` (Tailscale) — sudo password: `minecraft1`
+  - Paperclip API: `http://127.0.0.1:3100/api` (on server)
+  - Paperclip UI: `https://robotpants.ddns.net:9444`
+  - DB: `PGPASSWORD=paperclip psql -h 127.0.0.1 -p 54329 -U paperclip -d paperclip`
+- **GCP Daily Foods:** `ssh -i ~/.ssh/google_compute_engine adamteale@136.119.205.29`
+  - Paperclip UI: `https://paperclip.136-119-205-29.sslip.io`
+  - Open Design: `https://od.136-119-205-29.sslip.io`
+  - Daily Foods company ID: `29d6c3fd-03d3-43ed-a010-3b2afdff3465`
+  - Jira board: project key `DF`, board ID `2427`, 51 tickets
+- **WFE namespace:** `plugin_workflow_engine_2da16ae596`
+- **Wizard namespace:** `plugin_provisioning_wizard_2cbfa2c8e9`
+- **Server repos:** `/srv/paperclip/repo` (core), `/srv/TenX` (this repo), `/srv/paperclip/plugins` (installed plugins)
+
+## Current Status (2026-07-31)
+
+**Working:**
+- Provisioning wizard → company generation (agents, projects, repos, graphs, Gitea setup)
+- Workflow engine with multiple entry points (Feature, Bug fix, Quick fix)
+- Program-level fan-out + pipeline-level fan-out with child-coder graph
+- Integration contract embedding (fan-out reads parent's contract doc, embeds in children)
+- Hindsight memory (auto-recall at run start, auto-retain on comments, company-level bank)
+- Designer + Open Design mockups with brand skip/apply gate
+- Production deployment via `production-deploy` script + Caddy routing
+- Auto-approve at all human review gates (program plan, design, PR, preview)
+- CEO non-grab rules (won't override workflow assignments)
+- Coder sub-agent dispatch pattern (sp-implementer for parallel subtasks)
+- pi-local adapter patch: skip `pi --list-models` (eliminates heartbeat contention)
+- Fan-in loop fix, escaped-backtick parser fix, auto-cancel fix for standalone issues
+
+**Known issues:**
+- Wizard auto-config for Hindsight is unreliable — always verify/insert manually after generation
+- Agent instruction sync race — instructions may be empty if agents unpause before sync completes
+- Recovery system may reassign issues to wrong agents after errors
+- Sub-agent dispatch (sp-implementer) not yet verified working end-to-end in Paperclip context
+- Paperclip core ancestor context only passes parent titles, not descriptions (contract-in-description works around this)
+
+## Key Rules
+
+- **NEVER `DELETE` wizard sessions** — always `UPDATE status='active'` to restore a completed draft.
+- **Always pass `%` wildcards** to `zero-company.sh` (e.g. `'%X Bank%'`, not `'X Bank'`).
+- **Use `node esbuild.config.mjs`** to build plugins, NOT `npx esbuild` (ESM mismatch).
+- **ALWAYS deploy all 3 esbuild outputs** (`worker.js`, `manifest.js`, `ui/index.js`) + restart Paperclip + reset plugin status to `ready`.
+- **Plugin UI entrypoint must be a directory** (`"./dist/ui/"`) not a file (`"./dist/ui/index.js"`).
+- **Plugin UI must use `export const X: React.FC` pattern** (not `export function X`).
+- **Plugin UI must use CSS variables** for dark mode (`var(--card)`, `var(--foreground)`, `var(--border)`, `var(--muted-foreground)`).
+- **`ctx.config.get()` + `ctx.secrets.resolve()` do NOT work in plugin API route handlers** — read from `/etc/paperclip/env` instead.
+- **Jira API:** use `GET /rest/api/3/search/jql` (old `POST /search` was removed — 410).
+- **OD bridge uses scheduled jobs** — `setInterval` does NOT work in the plugin worker context.
+- **`runWorker(plugin, import.meta.url)`** — must pass `import.meta.url` or the worker crashes.
+- **Designer must use WFE `open_design_create` tool** — NOT the MCP tool (MCP tool doesn't append issue ID to project name).
+- **Agent heartbeat runs show 0 bytes for first few minutes** — this is normal, don't cancel.
+- **`ctx.issues.*` fails in watchdog context** — use HTTP fallbacks (`fetch http://127.0.0.1:3100/api/...`).
+- **Server patches are lost on restart** — add to `provision/paperclip-patches/` as `.patch` files.
+- **The Paperclip server runs from TypeScript source via tsx**, NOT from `dist/`.
+- **ALWAYS use the `run_tests` WFE tool to run test suites** — NEVER shell out to `pnpm test`, `npm test`, `jest`, or `vitest` directly. `run_tests` serialises execution server-wide (one suite at a time) to prevent CPU saturation when multiple Coder agents run simultaneously. Call it with `cwd` (project root) and `command` (e.g. `"pnpm test"`). See `docs/guides/wfe-test-runner.md` for why.
+
+## Plugin Development
+
+```bash
+# Build a plugin
+cd plugins/paperclip-workflow-engine && node esbuild.config.mjs
+
+# Deploy to server
+scp dist/worker.js test@100.112.32.2:/tmp/worker.js
+ssh test@100.112.32.2 "echo 'minecraft1' | sudo -S bash -c 'cp /tmp/worker.js /srv/paperclip/plugins/paperclip-workflow-engine/dist/worker.js && systemctl restart paperclip'"
+
+# Check plugin health
+ssh test@100.112.32.2 'curl -s http://127.0.0.1:3100/api/plugins | python3 -c "import sys,json; [print(f\"{p[\"pluginKey\"]}: {p[\"status\"]}\") for p in json.load(sys.stdin)]"'
+
+# If plugin stuck in error state:
+# UPDATE plugins SET status='ready' WHERE plugin_key='paperclip.workflow-engine';
+# then restart Paperclip
 ```
 
-Reset local dev DB:
+## Pi Skills Available
 
-```sh
-rm -rf data/pglite
-pnpm dev
-```
+Future agents (including cheaper/dumber models) should read these pi-skills:
+- `project:asus-nextcloud-tsa:paperclip-server-ops` — server access, API, DB, plugins, deployment
+- `project:asus-nextcloud-tsa:workflow-engine-reference` — node types, gates, enforcer logic
+- `project:asus-nextcloud-tsa:zero-and-restore-company` — zeroing + wizard draft restoration
+- `project:asus-nextcloud-tsa:plugins-reference` — what each plugin does, key routes, UI slots
+- `project:asus-nextcloud-tsa:project-orientation` — map of the entire infrastructure
+- `project:asus-nextcloud-tsa:paperclip-stuck-issue-recovery` — recover stuck/blocked issues
+- `project:asus-nextcloud-tsa:clean-demo-run-checklist` — pre-flight checklist before a demo run
 
-## 5. Core Engineering Rules
+## Session Budget
 
-1. Keep changes company-scoped.
-Every domain entity should be scoped to a company and company boundaries must be enforced in routes/services.
+- **Hard cap: 100K context tokens per session.** When you approach it, checkpoint state to `.agent-scratchpad.md` and start fresh.
+- Long command output → pipe to file, reference it, don't paste into chat.
+- Prefer `rg` (ripgrep) over `grep` for searching. Use CodeGraph tools for structural code questions.
 
-2. Keep contracts synchronized.
-If you change schema/API behavior, update all impacted layers:
-- `packages/db` schema and exports
-- `packages/shared` types/constants/validators
-- `server` routes/services
-- `ui` API clients and pages
+## Do Not
 
-3. Preserve control-plane invariants.
-- Single-assignee task model
-- Atomic issue checkout semantics
-- Approval gates for governed actions
-- Budget hard-stop auto-pause behavior
-- Activity logging for mutating actions
-
-4. Do not replace strategic docs wholesale unless asked.
-Prefer additive updates. Keep `doc/SPEC.md` and `doc/SPEC-implementation.md` aligned.
-
-5. Keep repo plan docs dated and centralized.
-When you are creating a plan file in the repository itself, new plan documents belong in `doc/plans/` and should use `YYYY-MM-DD-slug.md` filenames. This does not replace Paperclip issue planning: if a Paperclip issue asks for a plan, update the issue `plan` document per the `paperclip` skill instead of creating a repo markdown file.
-
-6. Attach inspectable generated artifacts.
-When your task produces a user-inspectable deliverable file, follow the Paperclip skill's "Generated Artifacts and Work Products" workflow before final disposition. In this repo, prefer the self-contained skill helper at `skills/paperclip/scripts/paperclip-upload-artifact.sh` so the file is available through the Paperclip API, create/update an artifact work product when the file is the deliverable, link the uploaded artifact in the final issue comment, and then set status. Do not rely on local filesystem paths as the only access path. If an important file intentionally remains workspace-only, create/update a work product with `metadata.resourceRef.kind: "workspace_file"` and a workspace-relative path, then name that work product and path in the final comment. Treat browse/search as a fallback for recovering workspace files, not the preferred deliverable path. See `doc/AGENT-ARTIFACTS.md` for details and `.mp4`/`.webm` examples.
-
-## 6. Database Change Workflow
-
-When changing data model:
-
-1. Edit `packages/db/src/schema/*.ts`
-2. Ensure new tables are exported from `packages/db/src/schema/index.ts`
-3. Generate migration:
-
-```sh
-pnpm db:generate
-```
-
-4. Validate compile:
-
-```sh
-pnpm -r typecheck
-```
-
-Notes:
-- `packages/db/drizzle.config.ts` reads compiled schema from `dist/schema/*.js`
-- `pnpm db:generate` compiles `packages/db` first
-
-## 7. Verification Before Hand-off
-
-Default local/agent test path:
-
-```sh
-pnpm test
-```
-
-This is the cheap default and only runs the Vitest suite. Browser suites stay opt-in:
-
-```sh
-pnpm test:e2e
-pnpm test:release-smoke
-```
-
-Run the browser suites only when your change touches them or when you are explicitly verifying CI/release flows.
-
-For normal issue work, run the smallest relevant verification first. Do not default to repo-wide typecheck/build/test on every heartbeat when a narrower check is enough to prove the change.
-
-Run this full check before claiming repo work done in a PR-ready hand-off, or when the change scope is broad enough that targeted checks are not sufficient:
-
-```sh
-pnpm -r typecheck
-pnpm test:run
-pnpm build
-```
-
-If anything cannot be run, explicitly report what was not run and why.
-
-## 8. API and Auth Expectations
-
-- Base path: `/api`
-- Board access is treated as full-control operator context
-- Agent access uses bearer API keys (`agent_api_keys`), hashed at rest
-- Agent keys must not access other companies
-
-When adding endpoints:
-
-- apply company access checks
-- enforce actor permissions (board vs agent)
-- write activity log entries for mutations
-- return consistent HTTP errors (`400/401/403/404/409/422/500`)
-
-## 9. UI Expectations
-
-- Keep routes and nav aligned with available API surface
-- Use company selection context for company-scoped pages
-- Surface failures clearly; do not silently ignore API errors
-
-## 10. Pull Request Requirements
-
-When creating a pull request (via `gh pr create` or any other method), you **must** read and fill in every section of [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md). Do not craft ad-hoc PR bodies — use the template as the structure for your PR description. Required sections:
-
-- **Thinking Path** — trace reasoning from project context to this change (see `CONTRIBUTING.md` for examples)
-- **What Changed** — bullet list of concrete changes
-- **Verification** — how a reviewer can confirm it works
-- **Risks** — what could go wrong
-- **Model Used** — the AI model that produced or assisted with the change (provider, exact model ID, context window, capabilities). Write "None — human-authored" if no AI was used.
-- **Checklist** — all items checked
-
-## 11. Definition of Done
-
-A change is done when all are true:
-
-1. Behavior matches `doc/SPEC-implementation.md`
-2. Typecheck, tests, and build pass
-3. Contracts are synced across db/shared/server/ui
-4. Docs updated when behavior or commands change
-5. PR description follows the [PR template](.github/PULL_REQUEST_TEMPLATE.md) with all sections filled in (including Model Used)
-
-## Design system
-
-`DESIGN.md` at the repo root is the source of truth for UI design decisions. The token-only rule applies to all `ui/` changes: every color, spacing, radius, type, shadow, and motion value in `ui/src/components/**` and `ui/src/pages/**` comes from the token layer in `ui/src/index.css` — no hex, raw px, arbitrary Tailwind bracket values, or raw `font-size`/`fontSize` declarations in components, outside the documented allowlist in `ui/src/index.css`. Run `pnpm check:token-gates` (`scripts/check-token-gates.mjs`) before committing UI changes — it fails on any violation not covered by that allowlist.
+- Do not scaffold product code inside `TenX`; use the per-project repo.
+- Do not paste >50 lines of command output into chat.
+- Do not claim work is complete without verification.
+- Do not DELETE wizard sessions — use UPDATE status='active'.
+- Do not use `npx esbuild` — use `node esbuild.config.mjs`.
+- Do not cancel heartbeat runs that show 0 bytes of log — wait 3-5 minutes.

@@ -128,6 +128,31 @@ export function buildPluginWorkerEnv(input: {
     PAPERCLIP_DEPLOYMENT_MODE: input.instanceInfo.deploymentMode ?? "",
     PAPERCLIP_DEPLOYMENT_EXPOSURE: input.instanceInfo.deploymentExposure ?? "",
   };
+  // WFE internal API key: lets plugin loopback calls (e.g. the WFE enforcer
+  // POST /api/enforce) authenticate on authenticated-mode instances. Without
+  // it the enforcer self-call 401s and WFE enforcement silently never runs.
+  const wfeInternalApiKey = processEnv.WFE_INTERNAL_API_KEY;
+  if (wfeInternalApiKey && wfeInternalApiKey.trim().length > 0) {
+    env.WFE_INTERNAL_API_KEY = wfeInternalApiKey;
+  }
+  // Instance-infra creds plugins need as a SINGLE SOURCE (process.env). Plugin
+  // workers receive a deliberately minimal env (spawnProcess does NOT spread
+  // process.env), so without these injections plugins silently 401 (board key),
+  // derive empty URLs (public/api/ui), or fall back to a hardcoded token
+  // (od-bridge) — all impossible to debug. Each plugin reads exactly one source
+  // (process.env) and fails closed if a needed value is absent.
+  for (const key of [
+    "PAPERCLIP_BOARD_API_KEY",
+    "PAPERCLIP_API_URL",
+    "PAPERCLIP_UI_URL",
+    "PAPERCLIP_PUBLIC_URL",
+    "OD_API_TOKEN",
+    "OD_BASE_URL",
+    "OD_PUBLIC_URL",
+  ]) {
+    const value = processEnv[key];
+    if (value && value.trim().length > 0) env[key] = value;
+  }
   const canRegisterEnvironmentDrivers = Array.isArray(input.manifest.capabilities)
     && input.manifest.capabilities.includes("environment.drivers.register");
   if (!canRegisterEnvironmentDrivers) return env;

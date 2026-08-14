@@ -7905,6 +7905,17 @@ export function issueService(db: Db) {
           .from(issueDocuments)
           .where(eq(issueDocuments.issueId, id));
 
+        // FK cascade gap: issue_read_states + issue_thread_interactions have
+        // default-RESTRICT FKs to issues (no ON DELETE CASCADE/SET NULL), so
+        // they must be cleared before the issue row delete below or this
+        // transaction throws 500 ("violates foreign key constraint
+        // issue_read_states_issue_id_issues_id_fk"). issue_comments has no FK
+        // and would otherwise orphan. Mirrors the company-delete cascade in
+        // services/companies.ts (see patch 0001).
+        await tx.delete(issueReadStates).where(eq(issueReadStates.issueId, id));
+        await tx.delete(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, id));
+        await tx.delete(issueComments).where(eq(issueComments.issueId, id));
+
         const removedIssue = await tx
           .delete(issues)
           .where(eq(issues.id, id))

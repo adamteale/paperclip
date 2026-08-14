@@ -73,4 +73,22 @@ describe("buildPaperclipEnv", () => {
 
     expect(env.PAPERCLIP_API_URL).toBe("http://[::1]:3101");
   });
+
+  it("includes PAPERCLIP_PROJECT_ID when a projectId is provided", () => {
+    const env = buildPaperclipEnv({ id: "agent-1", companyId: "company-1" }, "project-42");
+
+    expect(env.PAPERCLIP_PROJECT_ID).toBe("project-42");
+  });
+
+  it("omits PAPERCLIP_PROJECT_ID when no projectId is provided", () => {
+    const env = buildPaperclipEnv({ id: "agent-1", companyId: "company-1" });
+
+    expect(env.PAPERCLIP_PROJECT_ID).toBeUndefined();
+  });
+
+  it("omits PAPERCLIP_PROJECT_ID when projectId is blank", () => {
+    const env = buildPaperclipEnv({ id: "agent-1", companyId: "company-1" }, "   ");
+
+    expect(env.PAPERCLIP_PROJECT_ID).toBeUndefined();
+  });
 });

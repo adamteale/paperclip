@@ -609,7 +609,8 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     if (!(req.actor.source === "local_implicit" || req.actor.isInstanceAdmin)) {
       throw forbidden("Instance admin required");
     }
-    const ownerPrincipalId = req.actor.userId ?? "local-board";
+    const ownerPrincipalId =
+      (req.headers["x-owner-principal-id"] as string) || req.actor.userId || "local-board";
     const company = await svc.create({
       ...req.body,
       defaultResponsibleUserId: req.body.defaultResponsibleUserId ?? ownerPrincipalId,
@@ -621,6 +622,11 @@ export function companyRoutes(db: Db, storage?: StorageService) {
       "owner",
       req.actor.userId ?? null,
     );
+    // Also ensure local-board has access (needed for subsequent board-key API calls)
+    if (ownerPrincipalId !== "local-board") {
+      await access.ensureMembership(company.id, "user", "local-board", "owner", "active");
+      await access.ensureRoleDefaultGrants(company.id, "local-board", "owner", req.actor.userId ?? null);
+    }
     await logActivity(db, {
       companyId: company.id,
       actorType: "user",

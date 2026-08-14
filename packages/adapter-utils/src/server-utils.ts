@@ -1977,7 +1977,7 @@ export function buildInvocationEnvForLogs(
   return redactEnvForLogs(merged);
 }
 
-export function buildPaperclipEnv(agent: { id: string; companyId: string }): Record<string, string> {
+export function buildPaperclipEnv(agent: { id: string; companyId: string }, projectId?: string | null): Record<string, string> {
   const resolveHostForUrl = (rawHost: string): string => {
     const host = rawHost.trim();
     if (!host || host === "0.0.0.0" || host === "::") return "localhost";
@@ -1996,6 +1996,8 @@ export function buildPaperclipEnv(agent: { id: string; companyId: string }): Rec
     process.env.PAPERCLIP_RUNTIME_API_URL ??
     process.env.PAPERCLIP_API_URL ??
     `http://${runtimeHost}:${runtimePort}`;
+  const resolvedProjectId = typeof projectId === "string" ? projectId.trim() : "";
+  if (resolvedProjectId) vars.PAPERCLIP_PROJECT_ID = resolvedProjectId;
   vars.PAPERCLIP_API_URL = apiUrl;
   return vars;
 }
@@ -2138,7 +2140,17 @@ export function rewriteWorkspaceCwdEnvVarsForExecution(input: {
 }): Record<string, string> {
   const nextEnv = Object.fromEntries(
     Object.entries(input.env)
-      .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+      .map((entry): [string, string] | null => {
+        // Resolve {type:"plain", value:"..."} env objects (from DB adapterConfig)
+        // to their string value, alongside plain string entries.
+        const v = entry[1] as { value?: unknown } | string;
+        if (typeof v === "object" && v !== null && typeof v.value === "string") {
+          return [entry[0], v.value];
+        }
+        if (typeof v === "string") return [entry[0], v];
+        return null;
+      })
+      .filter((entry): entry is [string, string] => entry !== null),
   ) as Record<string, string>;
   const localWorkspaceCwd = typeof input.workspaceCwd === "string" && input.workspaceCwd.trim().length > 0
     ? path.resolve(input.workspaceCwd)

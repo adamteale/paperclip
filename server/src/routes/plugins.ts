@@ -1891,10 +1891,19 @@ export function pluginRoutes(
         headers: sanitizePluginRequestHeaders(req),
       };
 
+      // LLM-heavy plugin API endpoints (e.g. the provisioning wizard's
+      // assess/improve/generate) can exceed the 30s default RPC timeout, which
+      // surfaces as a 502 "RPC call timed out after 30000ms" even though the
+      // work continues in the worker. Make the timeout env-configurable so
+      // deployments running those workloads can raise it without forking.
+      // Defaults to 30s (unchanged behavior). Max is clamped to
+      // MAX_RPC_TIMEOUT_MS (15min) by the worker manager.
+      const apiRpcTimeoutMs = Number(process.env.PLUGIN_API_RPC_TIMEOUT_MS) || 30_000;
       const result = await bridgeDeps.workerManager.call(
         plugin.id,
         "handleApiRequest",
         input,
+        apiRpcTimeoutMs,
       ) as PluginScopedApiResponse;
       const status = Number.isInteger(result.status) && Number(result.status) >= 200 && Number(result.status) <= 599
         ? Number(result.status)

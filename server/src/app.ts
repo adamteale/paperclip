@@ -80,6 +80,7 @@ import { createPluginJobScheduler } from "./services/plugin-job-scheduler.js";
 import { pluginJobStore } from "./services/plugin-job-store.js";
 import { createPluginToolDispatcher } from "./services/plugin-tool-dispatcher.js";
 import { createToolGatewayService } from "./services/tool-gateway.js";
+import { setDefaultToolDispatcher } from "./services/heartbeat-plugin-tools.js";
 import { pluginLifecycleManager } from "./services/plugin-lifecycle.js";
 import { createPluginJobCoordinator } from "./services/plugin-job-coordinator.js";
 import { buildHostServices, flushPluginLogBuffer } from "./services/plugin-host-services.js";
@@ -460,6 +461,14 @@ export async function createApp(
     deploymentMode: opts.deploymentMode,
     deploymentExposure: opts.deploymentExposure,
   }));
+  // Expose the dispatcher on the app so the startup path (index.ts) can thread
+  // it into the heartbeat service, which needs it to populate plugin tools for
+  // agent executions.
+  app.locals.paperclipToolDispatcher = toolDispatcher;
+  // Register the process-wide default so EVERY heartbeatService instantiation
+  // (index.ts, routes, services) exposes plugin tools — not just the ones that
+  // explicitly thread the dispatcher through their options.
+  setDefaultToolDispatcher(toolDispatcher);
   const jobCoordinator = createPluginJobCoordinator({
     db,
     lifecycle,

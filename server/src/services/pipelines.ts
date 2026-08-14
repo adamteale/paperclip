@@ -3035,6 +3035,25 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
           automationAttemptId: execution.id,
         })
         .onConflictDoNothing({ target: [pipelineCaseIssueLinks.caseId, pipelineCaseIssueLinks.issueId] });
+      // Auto-parent the execution issue under the cases primary work-linked issue so it
+      // appears as a child of the originating ticket in the board view.
+      const workLink = await db
+        .select({ issueId: pipelineCaseIssueLinks.issueId })
+        .from(pipelineCaseIssueLinks)
+        .where(and(
+          eq(pipelineCaseIssueLinks.companyId, execution.companyId),
+          eq(pipelineCaseIssueLinks.caseId, execution.caseId),
+          eq(pipelineCaseIssueLinks.role, "work"),
+        ))
+        .orderBy(asc(pipelineCaseIssueLinks.createdAt))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      if (workLink) {
+        await db
+          .update(issues)
+          .set({ parentId: workLink.issueId, updatedAt: nowDate() })
+          .where(eq(issues.id, run.linkedIssueId));
+      }
       await writeCaseEvent(db, {
         companyId: execution.companyId,
         caseId: execution.caseId,

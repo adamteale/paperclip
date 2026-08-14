@@ -317,6 +317,8 @@ import {
   type EffectiveRunConfigSecretManifestEntry,
 } from "./effective-run-config-fingerprints.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
+import { selectPluginTools } from "./heartbeat-plugin-tools.js";
+import type { PluginToolDispatcher } from "./plugin-tool-dispatcher.js";
 import { serverVersion } from "../version.js";
 
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
@@ -6508,6 +6510,7 @@ export interface HeartbeatServiceOptions {
   pluginWorkerManager?: PluginWorkerManager;
   environmentRuntime?: HeartbeatEnvironmentRuntime;
   runtimeEnv?: Record<string, string | undefined>;
+  toolDispatcher?: PluginToolDispatcher;
 }
 
 type WorkspaceReadyCommentWriter = {
@@ -13147,6 +13150,42 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       ) {
         continue;
       }
+      // --- Max run duration cap (local patch: prevents runaway compute waste) ---
+      // Two-tier: (1) no useful action + alive > MAX_RUN_DURATION_SEC (default
+      // 900=15min) → kill (stuck in a tool-call loop); (2) hard cap at 2x → kill
+      // regardless. Configurable via MAX_RUN_DURATION_SEC env var.
+      const MAX_RUN_DURATION_MS = (parseInt(process.env.MAX_RUN_DURATION_SEC || "900", 10) || 900) * 1000;
+      if (processPidAlive && run.startedAt) {
+        const runDurationMs = now.getTime() - new Date(run.startedAt).getTime();
+        const hasUsefulAction = run.lastUsefulActionAt != null;
+        const idleTooLong = !hasUsefulAction && runDurationMs > MAX_RUN_DURATION_MS;
+        const hardCap = runDurationMs > MAX_RUN_DURATION_MS * 2;
+        if (idleTooLong || hardCap) {
+          await terminateHeartbeatRunProcess({
+            pid: run.processPid,
+            processGroupId: run.processGroupId,
+            graceMs: 5000,
+          });
+          const reason = hardCap
+            ? `hard cap (${Math.round(MAX_RUN_DURATION_MS * 2 / 1000)}s, ran ${Math.round(runDurationMs / 1000)}s)`
+            : `no useful action after ${Math.round(MAX_RUN_DURATION_MS / 1000)}s (ran ${Math.round(runDurationMs / 1000)}s)`;
+          const cappedMessage = `Run terminated: ${reason}; terminated to prevent runaway compute waste`;
+          await setRunStatus(run.id, "failed", {
+            error: cappedMessage,
+            errorCode: "max_duration_exceeded",
+            finishedAt: now,
+          });
+          await appendRunEvent(run, await nextRunEventSeq(run.id), {
+            eventType: "lifecycle",
+            stream: "system",
+            level: "warn",
+            message: cappedMessage,
+            payload: { runDurationMs, maxRunDurationMs: MAX_RUN_DURATION_MS, hasUsefulAction, hardCap },
+          });
+          continue;
+        }
+      }
+      // --- End max run duration cap ---
       if (processPidAlive) {
         if (run.errorCode !== DETACHED_PROCESS_ERROR_CODE) {
           const detachedMessage = `Lost in-memory process handle, but child pid ${run.processPid} is still alive`;
@@ -15566,6 +15605,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           agent,
           runtime: runtimeForAdapter,
           config: runtimeConfig,
+          pluginTools: selectPluginTools(options.toolDispatcher),
           context: adapterContext,
           runtimeCommandSpec: adapter.getRuntimeCommandSpec?.(runtimeConfig) ?? null,
           executionTarget,
@@ -18227,9 +18267,47 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const sameScopeScheduledRetryRun = activeRuns.find(
       (candidate) => candidate.status === "scheduled_retry" && isSameTaskScope(runTaskKey(candidate), taskKey),
     );
-    const sameScopeRunningRun = activeRuns.find(
-      (candidate) => candidate.status === "running" && isSameTaskScope(runTaskKey(candidate), taskKey),
-    );
+    // Pure exploratory wake (no issue/comment/task scope) that fires while
+    // the agent is ALREADY busy must not start a duplicate run. Such a wake's
+    // task key is the synthetic __heartbeat__ (from
+    // deriveTaskKeyWithHeartbeatFallback) or null, neither of which matches an
+    // issue-scoped running run's task key (the issueId). Without this guard the
+    // wake slips past the same-scope coalescing and starts a second concurrent
+    // run for the same agent+issue — burning double tokens.
+    //
+    // Observed live on ZBA-3 (2026-08-03): the designer agent had an in-flight
+    // retry run (75161238, retry of ee695743 which failed process_lost). An
+    // interval_elapsed wake (run e99fa17f, source=automation, no issueId,
+    // taskKey=__heartbeat__) slipped past patch-0017's issueId-keyed dedup
+    // (which only matches wakes that CARRY an issueId) and started a second
+    // concurrent run on the same ZBA-3 issue. The same pattern recurred after
+    // a paperclip restart: restart retries with no issueId duplicated the
+    // issue-scoped retry.
+    //
+    // Fix: when ANY exploratory wake (no issueId, no wakeCommentId, no explicit
+    // taskKey/taskId) is enqueued and the agent already has an active run
+    // (queued/scheduled_retry/running), coalesce into the existing run instead
+    // of duplicating. Source is intentionally NOT part of the condition — timer,
+    // automation, and interval-retry wakes with no specific target all represent
+    // "any new work?" probes that have no new work to surface when the agent is
+    // busy. Wakes carrying a specific issue/comment/task target take the normal
+    // same-scope coalescing path and are unaffected.
+    // (Agents with maxConcurrentRuns>1 that intentionally run multiple issues
+    // concurrently are unaffected: those runs are issue-scoped, not exploratory.)
+    const isPureExploratoryWake =
+      !issueId &&
+      !wakeCommentId &&
+      !(readNonEmptyString(enrichedContextSnapshot.taskKey) ?? readNonEmptyString(enrichedContextSnapshot.taskId));
+    const busyActiveRun = isPureExploratoryWake
+      ? activeRuns.find((candidate) => EXECUTION_PATH_HEARTBEAT_RUN_STATUSES.includes(candidate.status as (typeof EXECUTION_PATH_HEARTBEAT_RUN_STATUSES)[number]))
+      : null;
+    const sameScopeRunningRun =
+      activeRuns.find(
+        (candidate) => candidate.status === "running" && isSameTaskScope(runTaskKey(candidate), taskKey),
+      ) ?? (busyActiveRun && busyActiveRun.status === "running" ? busyActiveRun : null);
+    const sameScopeQueuedOrRetryForBusyTimer = isPureExploratoryWake
+      ? (sameScopeQueuedRun ?? sameScopeScheduledRetryRun ?? (busyActiveRun && busyActiveRun.status !== "running" ? busyActiveRun : null))
+      : null;
     const shouldQueueFollowupForRunningWake =
       Boolean(sameScopeRunningRun) &&
       !sameScopeQueuedRun &&
@@ -18237,6 +18315,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const rawCoalescedTarget =
       sameScopeQueuedRun ??
       sameScopeScheduledRetryRun ??
+      sameScopeQueuedOrRetryForBusyTimer ??
       (shouldQueueFollowupForRunningWake ? null : sameScopeRunningRun ?? null);
 
     const coalescedTargetRun = filterZombieCoalesceTarget(

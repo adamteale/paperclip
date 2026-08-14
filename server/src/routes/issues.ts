@@ -9911,6 +9911,23 @@ export function issueRoutes(
     if (!existing) return;
     if (!(await assertAgentIssueMutationAllowed(req, res, existing))) return;
     const attachments = await svc.listAttachments(id);
+    // Cascade-delete the NO ACTION / RESTRICT child rows before svc.remove (patch 0027)
+    try {
+      await db.$client`DELETE FROM cost_events WHERE issue_id = ${id}`;
+      await db.$client`DELETE FROM decision_bundles WHERE origin_issue_id = ${id}`;
+      await db.$client`DELETE FROM decision_effect_executions WHERE target_issue_id = ${id}`;
+      await db.$client`DELETE FROM decisions WHERE origin_issue_id = ${id}`;
+      await db.$client`DELETE FROM feedback_votes WHERE issue_id = ${id}`;
+      await db.$client`DELETE FROM finance_events WHERE issue_id = ${id}`;
+      await db.$client`DELETE FROM issue_comments WHERE issue_id = ${id}`;
+      await db.$client`DELETE FROM issue_inbox_archives WHERE issue_id = ${id}`;
+      await db.$client`DELETE FROM issue_read_states WHERE issue_id = ${id}`;
+      await db.$client`DELETE FROM issue_thread_interactions WHERE issue_id = ${id}`;
+      await db.$client`DELETE FROM company_skill_test_runs WHERE issue_id = ${id}`;
+    } catch (e) {
+      res.status(500).json({ error: "Failed to cascade-delete issue children: " + String((e as Error)?.message ?? e) });
+      return;
+    }
 
     const issue = await svc.remove(id);
     if (!issue) {

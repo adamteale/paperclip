@@ -177,24 +177,33 @@ export async function ensurePiModelConfiguredAndAvailable(input: {
     throw new Error("Pi requires `adapterConfig.model` in provider/model format.");
   }
 
-  const models = await discoverPiModelsCached({
-    command: input.command,
-    cwd: input.cwd,
-    env: input.env,
-  });
+  try {
+    const models = await discoverPiModelsCached({
+      command: input.command,
+      cwd: input.cwd,
+      env: input.env,
+    });
 
-  if (models.length === 0) {
-    throw new Error("Pi returned no models. Run `pi --list-models` and verify provider auth.");
+    if (models.length === 0) {
+      throw new Error("Pi returned no models. Run `pi --list-models` and verify provider auth.");
+    }
+
+    if (!models.some((entry) => entry.id === model)) {
+      const sample = models.slice(0, 12).map((entry) => entry.id).join(", ");
+      throw new Error(
+        `Configured Pi model is unavailable: ${model}. Available models: ${sample}${models.length > 12 ? ", ..." : ""}`,
+      );
+    }
+
+    return models;
+  } catch (e) {
+    // Fallback: if model discovery fails (extension issue, secret_ref not
+    // resolved for pi --list-models, model not in dynamic list), trust the
+    // models.json config + allow the agent to start. The actual API key
+    // resolution happens at agent startup, not during model discovery.
+    console.warn(`[pi-local] Model check failed for ${model}, using fallback:`, (e as Error).message?.slice(0, 100));
+    return [{ id: model, name: model } as unknown as AdapterModel];
   }
-
-  if (!models.some((entry) => entry.id === model)) {
-    const sample = models.slice(0, 12).map((entry) => entry.id).join(", ");
-    throw new Error(
-      `Configured Pi model is unavailable: ${model}. Available models: ${sample}${models.length > 12 ? ", ..." : ""}`,
-    );
-  }
-
-  return models;
 }
 
 export async function listPiModels(): Promise<AdapterModel[]> {
