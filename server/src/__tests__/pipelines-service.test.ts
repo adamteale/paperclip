@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   issueThreadInteractions,
@@ -1939,6 +1939,16 @@ describeEmbeddedPostgres("pipelineService", () => {
       await db.update(issues).set({ status: "in_review" }).where(eq(issues.id, issue.id));
       result = await svc.sweepIssueGateCases();
       expect(result.advanced).toBe(1);
+
+      // The transition mirrors into the company activity log (entityType
+      // pipeline_case) so live-update clients invalidate pipeline queries.
+      const mirrored = await db
+        .select({ action: activityLog.action })
+        .from(activityLog)
+        .where(and(eq(activityLog.entityId, created.case.id), eq(activityLog.action, "pipeline.case_transitioned")))
+        .limit(1)
+        .then((rows) => rows[0] ?? null);
+      expect(mirrored?.action).toBe("pipeline.case_transitioned");
       [fresh] = await db.select().from(pipelineCases).where(eq(pipelineCases.id, created.case.id));
       const workingStage = (await svc.listStages(company.id, pipeline.id)).find((s) => s.key === "working")!;
       expect(fresh!.stageId).toBe(workingStage.id);
