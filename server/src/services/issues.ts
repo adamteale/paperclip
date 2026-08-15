@@ -129,6 +129,7 @@ import {
   type ActivityPublication,
 } from "./activity-log.js";
 import { buildIssueChanges } from "./issue-change-receipt.js";
+import { inheritReferenceUrls } from "./reference-inheritance.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -6605,6 +6606,7 @@ export function issueService(db: Db) {
           companyId: issues.companyId,
           projectId: issues.projectId,
           goalId: issues.goalId,
+          description: issues.description,
         })
         .from(issues)
         .where(eq(issues.id, sourceIssueId))
@@ -6749,6 +6751,10 @@ export function issueService(db: Db) {
 
           const createdChild = await issueService(tx as unknown as Db).createChild(sourceIssue.id, {
             ...nextChildInput,
+            // Decomposition fidelity: references in the source issue's
+            // description (Jira, Figma, OD, …) missing from the child
+            // description are appended so children never lose the sources.
+            description: inheritReferenceUrls(nextChildInput.description ?? null, sourceIssue.description) ?? undefined,
             executionWorkspaceInheritanceMode: "strategy_only",
           });
           const nextIds = [...existingChildIssueIds, createdChild.issue.id];

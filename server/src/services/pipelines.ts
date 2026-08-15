@@ -46,6 +46,7 @@ import {
   type RoutineRevisionSnapshotV1,
 } from "@paperclipai/shared";
 import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
+import { inheritReferenceUrls } from "./reference-inheritance.js";
 import { routineService } from "./routines.js";
 import { secretService } from "./secrets.js";
 import type { IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
@@ -4465,7 +4466,11 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         validateFieldsForIntakeStage(targetStage, fields);
         return {
           title: item.title,
-          summary: item.summary ?? null,
+          // Decomposition fidelity: external references (Figma, Open Design,
+          // Jira links, …) present in the parent case but missing from the
+          // child summary are appended, so downstream stages (design in
+          // particular) never lose the sources the request referenced.
+          summary: inheritReferenceUrls(item.summary ?? null, detail.case.summary),
           fields,
           stageKey: config.targetStageKey,
           parentCaseId: detail.case.id,

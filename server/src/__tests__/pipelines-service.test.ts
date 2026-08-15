@@ -235,6 +235,72 @@ describeEmbeddedPostgres("pipelineService", () => {
     ).resolves.toMatchObject({ case: { terminalKind: "done" } });
   });
 
+  it("inherits parent reference urls into breakdown child summaries", async () => {
+    const { company, pipeline, byKey } = await seedPipeline();
+    const target = await svc.createPipeline({
+      companyId: company.id,
+      key: `design-${randomUUID().slice(0, 8)}`,
+      name: "Design",
+      actor: userActor,
+    });
+    const targetStages = await svc.listStages(company.id, target.id);
+    const targetIntake = targetStages.find((stage) => stage.key === "intake")!;
+
+    await svc.updateStage({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      stageId: byKey.get("intake")!.id,
+      patch: {
+        config: {
+          breakdown: {
+            targetPipelineId: target.id,
+            targetStageKey: targetIntake.key,
+            pieceNoun: "component",
+          },
+        } as never,
+      },
+    });
+
+    const parent = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "df-165",
+      title: "UI Library",
+      summary:
+        "Implement tokens per the brand manual. " +
+        "Figma: https://www.figma.com/design/rmWi7jY8a6XzaASwTNZxZu/DS-Daily-Foods?node-id=2148 " +
+        "Source: [DF-165](https://applydigital.atlassian.net/browse/DF-165)",
+      actor: userActor,
+    });
+
+    const breakdown = await svc.breakdownCase({
+      companyId: company.id,
+      caseId: parent.case.id,
+      items: [
+        { key: "navbar", title: "Navbar shell", summary: "Build the navbar shell component." },
+        { key: "footer", title: "Footer shell", summary: null },
+      ],
+      actor: userActor,
+    });
+
+    expect(breakdown.items).toHaveLength(2);
+    const summaries = await db
+      .select({ title: pipelineCases.title, summary: pipelineCases.summary })
+      .from(pipelineCases)
+      .where(eq(pipelineCases.parentCaseId, parent.case.id));
+    expect(summaries).toHaveLength(2);
+
+    const withSummary = summaries.find((row) => row.title === "Navbar shell")!;
+    expect(withSummary.summary).toContain("Build the navbar shell component.");
+    expect(withSummary.summary).toContain("**References (inherited from parent):**");
+    expect(withSummary.summary).toContain("- https://www.figma.com/design/rmWi7jY8a6XzaASwTNZxZu/DS-Daily-Foods?node-id=2148");
+    expect(withSummary.summary).toContain("- https://applydigital.atlassian.net/browse/DF-165");
+
+    const nullSummary = summaries.find((row) => row.title === "Footer shell")!;
+    expect(nullSummary.summary!.startsWith("**References (inherited from parent):**")).toBe(true);
+
+  });
+
   it("implements idempotent single and batch ingest", async () => {
     const { company, pipeline } = await seedPipeline();
 
