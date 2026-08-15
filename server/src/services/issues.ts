@@ -189,6 +189,7 @@ import {
 import { buildIssueChanges } from "./issue-change-receipt.js";
 import { projectSafeChatPublication } from "./chat-publication-projection.js";
 import { issueThreadInteractionAttentionAgentAllowed } from "./issue-thread-interaction-resolution.js";
+import { inheritReferenceUrls } from "./reference-inheritance.js";
 
 const ALL_ISSUE_STATUSES = [
   "backlog",
@@ -9284,6 +9285,7 @@ export function issueService(db: Db) {
           companyId: issues.companyId,
           projectId: issues.projectId,
           goalId: issues.goalId,
+          description: issues.description,
         })
         .from(issues)
         .where(eq(issues.id, sourceIssueId))
@@ -9477,6 +9479,10 @@ export function issueService(db: Db) {
             tx as unknown as Db,
           ).createChild(sourceIssue.id, {
             ...nextChildInput,
+            // Decomposition fidelity: references in the source issue's
+            // description (Jira, Figma, OD, …) missing from the child
+            // description are appended so children never lose the sources.
+            description: inheritReferenceUrls(nextChildInput.description ?? null, sourceIssue.description) ?? undefined,
             executionWorkspaceInheritanceMode: "strategy_only",
           });
           const nextIds = [...existingChildIssueIds, createdChild.issue.id];
