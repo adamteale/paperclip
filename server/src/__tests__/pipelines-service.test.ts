@@ -350,6 +350,42 @@ describeEmbeddedPostgres("pipelineService", () => {
     expect(count).toBe(5);
   });
 
+  it("ingest with parentCaseId inherits parent reference urls into summary", async () => {
+    const { company, pipeline } = await seedPipeline();
+    const parent = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "parent-refs",
+      title: "Parent",
+      summary: "Spec with Figma: https://www.figma.com/design/abc/DS?node-id=1 and [DF-1](https://jira.example/browse/DF-1)",
+      actor: userActor,
+    });
+    const child = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "child-1",
+      title: "Child",
+      summary: "Do the work.",
+      parentCaseId: parent.case.id,
+      requestKey: "piece:child-1",
+      actor: userActor,
+    });
+    expect(child.case.summary).toContain("Do the work.");
+    expect(child.case.summary).toContain("**References (inherited from parent):**");
+    expect(child.case.summary).toContain("- https://www.figma.com/design/abc/DS?node-id=1");
+    expect(child.case.summary).toContain("- https://jira.example/browse/DF-1");
+
+    const noParent = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "orphan-1",
+      title: "Orphan",
+      summary: "No inheritance expected.",
+      actor: userActor,
+    });
+    expect(noParent.case.summary).toBe("No inheritance expected.");
+  });
+
   it("persists workspaceRef during ingest", async () => {
     const { company, pipeline } = await seedPipeline();
     const workspaceRef = {

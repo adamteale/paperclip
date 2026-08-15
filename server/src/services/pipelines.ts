@@ -4138,6 +4138,13 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         const automationAttempt = input.actor.type === "agent"
           ? await resolveAutomationAttemptForActorRun(tx, input.companyId, input.actor.runId)
           : null;
+        // Decomposition fidelity: child cases created with a parentCaseId
+        // (routine-driven ingest, breakdown, bridges) inherit the parent's
+        // external reference urls (Figma/Open Design/Jira) when the child
+        // summary omits them — design stages must never lose the sources.
+        const inheritedSummary = parentCase
+          ? inheritReferenceUrls(input.summary ?? null, parentCase.summary)
+          : (input.summary ?? null);
         const blockedByCaseKeyMap = await resolveBlockerCaseKeys(tx, {
           companyId: input.companyId,
           pipelineId: input.pipelineId,
@@ -4172,7 +4179,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
             stageId: stage.id,
             caseKey,
             title: input.title,
-            summary: input.summary ?? null,
+            summary: inheritedSummary,
             fields: input.fields ?? {},
             workspaceRef: input.workspaceRef ?? null,
             parentCaseId: input.parentCaseId ?? null,
@@ -4215,7 +4222,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         await ensurePipelineCaseBodyDocumentFromSummary(tx, {
           companyId: input.companyId,
           caseId: inserted.id,
-          summary: input.summary,
+          summary: inheritedSummary ?? undefined,
           actor: input.actor,
         });
 
