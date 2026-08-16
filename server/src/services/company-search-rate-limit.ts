@@ -1,5 +1,9 @@
 export const COMPANY_SEARCH_RATE_LIMIT_WINDOW_MS = 60_000;
-export const COMPANY_SEARCH_RATE_LIMIT_MAX_REQUESTS = 60;
+// Local: 240/min (upstream 60) — single-board personal instances (robotpants)
+// trip 60/min during live-update polling bursts; the limiter targets
+// multi-tenant SaaS abuse, not a one-user board. Upstream default kept for
+// reference; retire this patch if the constant gains a config knob upstream.
+export const COMPANY_SEARCH_RATE_LIMIT_MAX_REQUESTS = 240;
 
 export type CompanySearchRateLimitActor = {
   companyId: string;
