@@ -4268,6 +4268,40 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         }
         return { case: inserted, created: true, event: ingestEvent, automationLedger: null };
       });
+      // Propagate the parent case's work-linked issues to the child case so
+      // that automation issues created on child cases (by the auto-parenting
+      // code below in executeAutomationLedgers) are parented under the root
+      // ticket in the board view. Without this, child-case automation issues
+      // appear flat — the auto-parenting code only looks at the current
+      // case's work links, not the parent's. Best-effort: failures must not
+      // block case creation.
+      if (result.created && input.parentCaseId) {
+        try {
+          const parentWorkIssues = await db
+            .select({ issueId: pipelineCaseIssueLinks.issueId })
+            .from(pipelineCaseIssueLinks)
+            .where(and(
+              eq(pipelineCaseIssueLinks.companyId, input.companyId),
+              eq(pipelineCaseIssueLinks.caseId, input.parentCaseId),
+              eq(pipelineCaseIssueLinks.role, "work"),
+            ));
+          if (parentWorkIssues.length > 0) {
+            await db
+              .insert(pipelineCaseIssueLinks)
+              .values(parentWorkIssues.map(({ issueId }) => ({
+                companyId: input.companyId,
+                caseId: result.case.id,
+                issueId,
+                role: "work" as const,
+                createdByRunId: null,
+                automationAttemptId: null,
+              })))
+              .onConflictDoNothing({ target: [pipelineCaseIssueLinks.caseId, pipelineCaseIssueLinks.issueId] });
+          }
+        } catch {
+          // Best-effort: don't block case creation if work-link propagation fails
+        }
+      }
       const automationExecutions = await executeAutomationLedgers(automationLedgers, { type: "system" });
       // Auto-link approved reference Cases (caseType starting with 'reference_')
       // to this newly created pipeline case so agents see reference documents
