@@ -2886,9 +2886,10 @@ export async function realizeExecutionWorkspace(input: {
     if (reusable.validation?.valid) {
       return await reuseExistingWorktree(worktreePath, reusable.branchName, reusable.warnings);
     }
-    const validation = reusable.validation;
-    const reason = validation && !validation.valid ? ` (${validation.reason})` : "";
-    throw new Error(`Configured worktree path "${worktreePath}" already exists and is not a reusable git worktree${reason}.`);
+    // Stale worktree directory (orphaned by a crashed/interrupted run).
+    // Remove it and fall through to create a fresh worktree instead of
+    // blocking every subsequent agent run on this project.
+    await fs.rm(worktreePath, { recursive: true, force: true });
   }
 
   const registeredBranchWorktree = await findRegisteredGitWorktreeByBranch(repoRoot, branchName);
