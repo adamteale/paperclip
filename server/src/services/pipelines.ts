@@ -3113,24 +3113,49 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
           automationAttemptId: execution.id,
         })
         .onConflictDoNothing({ target: [pipelineCaseIssueLinks.caseId, pipelineCaseIssueLinks.issueId] });
-      // Auto-parent the execution issue under the cases primary work-linked issue so it
-      // appears as a child of the originating ticket in the board view.
-      const workLink = await db
+      // Auto-parent the execution issue so it appears as a child in the board view.
+      // Cascade: parent under the most recent PREVIOUS stage's automation issue
+      // (so brief → design → implement form a chain, not flat siblings).
+      // Supports branching: if implement splits into multiple issues, they all
+      // parent under the design issue (the most recent previous automation).
+      // First stage (no previous automation): fall back to the work-linked issue.
+      const previousAutomation = await db
         .select({ issueId: pipelineCaseIssueLinks.issueId })
         .from(pipelineCaseIssueLinks)
         .where(and(
           eq(pipelineCaseIssueLinks.companyId, execution.companyId),
           eq(pipelineCaseIssueLinks.caseId, execution.caseId),
-          eq(pipelineCaseIssueLinks.role, "work"),
+          eq(pipelineCaseIssueLinks.role, "automation"),
+          ne(pipelineCaseIssueLinks.issueId, run.linkedIssueId),
+          isNull(pipelineCaseIssueLinks.retiredAt),
         ))
-        .orderBy(asc(pipelineCaseIssueLinks.createdAt))
+        .orderBy(desc(pipelineCaseIssueLinks.createdAt))
         .limit(1)
         .then((rows) => rows[0] ?? null);
-      if (workLink) {
+      if (previousAutomation) {
         await db
           .update(issues)
-          .set({ parentId: workLink.issueId, updatedAt: nowDate() })
+          .set({ parentId: previousAutomation.issueId, updatedAt: nowDate() })
           .where(eq(issues.id, run.linkedIssueId));
+      } else {
+        // First stage: parent under the case's primary work-linked issue (root ticket)
+        const workLink = await db
+          .select({ issueId: pipelineCaseIssueLinks.issueId })
+          .from(pipelineCaseIssueLinks)
+          .where(and(
+            eq(pipelineCaseIssueLinks.companyId, execution.companyId),
+            eq(pipelineCaseIssueLinks.caseId, execution.caseId),
+            eq(pipelineCaseIssueLinks.role, "work"),
+          ))
+          .orderBy(asc(pipelineCaseIssueLinks.createdAt))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+        if (workLink) {
+          await db
+            .update(issues)
+            .set({ parentId: workLink.issueId, updatedAt: nowDate() })
+            .where(eq(issues.id, run.linkedIssueId));
+        }
       }
       await writeCaseEvent(db, {
         companyId: execution.companyId,
