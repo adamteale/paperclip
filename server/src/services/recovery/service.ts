@@ -5520,7 +5520,7 @@ export function recoveryService(
         findingIssueIds.length === 0
           ? []
           : (await db
-              .select({ id: pipelineCaseIssueLinks.issueId })
+              .select({ issueId: pipelineCaseIssueLinks.issueId })
               .from(pipelineCaseIssueLinks)
               .innerJoin(pipelineCases, eq(pipelineCases.id, pipelineCaseIssueLinks.caseId))
               .where(and(
