@@ -4334,26 +4334,43 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       // block case creation.
       if (result.created && input.parentCaseId) {
         try {
-          const parentWorkIssues = await db
+          // Only propagate if the child case doesn't already have its own
+          // work links (e.g. the Jira bridge linked the child's mirror issue).
+          // For pipeline decompositions (breakdownCase), the child is new with
+          // no work links → propagation fires. For Jira imports where the
+          // bridge already linked the child's mirror, skip — the child has
+          // its own root ticket.
+          const existingWorkLinks = await db
             .select({ issueId: pipelineCaseIssueLinks.issueId })
             .from(pipelineCaseIssueLinks)
             .where(and(
               eq(pipelineCaseIssueLinks.companyId, input.companyId),
-              eq(pipelineCaseIssueLinks.caseId, input.parentCaseId),
+              eq(pipelineCaseIssueLinks.caseId, result.case.id),
               eq(pipelineCaseIssueLinks.role, "work"),
+              isNull(pipelineCaseIssueLinks.retiredAt),
             ));
-          if (parentWorkIssues.length > 0) {
-            await db
-              .insert(pipelineCaseIssueLinks)
-              .values(parentWorkIssues.map(({ issueId }) => ({
-                companyId: input.companyId,
-                caseId: result.case.id,
-                issueId,
-                role: "work" as const,
-                createdByRunId: null,
-                automationAttemptId: null,
-              })))
-              .onConflictDoNothing({ target: [pipelineCaseIssueLinks.caseId, pipelineCaseIssueLinks.issueId] });
+          if (existingWorkLinks.length === 0) {
+            const parentWorkIssues = await db
+              .select({ issueId: pipelineCaseIssueLinks.issueId })
+              .from(pipelineCaseIssueLinks)
+              .where(and(
+                eq(pipelineCaseIssueLinks.companyId, input.companyId),
+                eq(pipelineCaseIssueLinks.caseId, input.parentCaseId),
+                eq(pipelineCaseIssueLinks.role, "work"),
+              ));
+            if (parentWorkIssues.length > 0) {
+              await db
+                .insert(pipelineCaseIssueLinks)
+                .values(parentWorkIssues.map(({ issueId }) => ({
+                  companyId: input.companyId,
+                  caseId: result.case.id,
+                  issueId,
+                  role: "work" as const,
+                  createdByRunId: null,
+                  automationAttemptId: null,
+                })))
+                .onConflictDoNothing({ target: [pipelineCaseIssueLinks.caseId, pipelineCaseIssueLinks.issueId] });
+            }
           }
         } catch {
           // Best-effort: don't block case creation if work-link propagation fails
