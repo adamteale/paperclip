@@ -3469,8 +3469,34 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
    */
   async function issueGateSatisfiedForCase(
     tx: PipelineDb,
-    input: { companyId: string; caseId: string; rule: PipelineIssueGateConfig },
+    input: {
+      companyId: string;
+      caseId: string;
+      rule: PipelineIssueGateConfig;
+      stage?: typeof pipelineStages.$inferSelect;
+    },
   ): Promise<boolean> {
+    // When the stage is known, restrict to automation issues whose execution
+    // belongs to THIS stage's onEnter automation — prevents gate cascade where
+    // a done automation issue from a previous stage satisfies gates on every
+    // subsequent stage (e.g. brief->fanout->integration->released all firing
+    // instantly off the same done brief automation issue).
+    const stageAutomationId = input.stage ? stageAutomation(input.stage)?.id : undefined;
+    let stageExecutionIssueIds: string[] | undefined;
+    if (stageAutomationId) {
+      stageExecutionIssueIds = await tx
+        .select({ id: pipelineAutomationExecutions.executionIssueId })
+        .from(pipelineAutomationExecutions)
+        .where(
+          and(
+            eq(pipelineAutomationExecutions.companyId, input.companyId),
+            eq(pipelineAutomationExecutions.caseId, input.caseId),
+            eq(pipelineAutomationExecutions.automationId, stageAutomationId),
+            isNotNull(pipelineAutomationExecutions.executionIssueId),
+          ),
+        )
+        .then((rows) => rows.map((r) => r.id!));
+    }
     const linked = await tx
       .select({ issueId: pipelineCaseIssueLinks.issueId, status: issues.status })
       .from(pipelineCaseIssueLinks)
@@ -3481,6 +3507,11 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
           eq(pipelineCaseIssueLinks.caseId, input.caseId),
           isNull(pipelineCaseIssueLinks.retiredAt),
           inArray(pipelineCaseIssueLinks.role, input.rule.roles),
+          ...(stageExecutionIssueIds && stageExecutionIssueIds.length > 0
+            ? [inArray(pipelineCaseIssueLinks.issueId, stageExecutionIssueIds)]
+            : stageAutomationId
+              ? [sql`false`] // stage has automation but no execution issues yet
+              : []),
         ),
       );
     if (linked.length === 0) return false;
@@ -3533,6 +3564,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       companyId: input.companyId,
       caseId: input.caseRow.id,
       rule,
+      stage: input.stage,
     });
     if (!satisfied) return;
     const toStage = await getStageByKeyOrThrow(tx, input.caseRow.pipelineId, rule.toStageKey);
