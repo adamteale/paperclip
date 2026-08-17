@@ -50,6 +50,8 @@ import {
   nativeRunResults,
   statusDecisions,
   workAssessments,
+  pipelineCaseIssueLinks,
+  pipelineCases,
 } from "@paperclipai/db";
 import { parseObject, asBoolean, asNumber } from "../../adapters/utils.js";
 import { runningProcesses } from "../../adapters/index.js";
@@ -5477,6 +5479,157 @@ export function recoveryService(
         },
         "issue graph liveness backstop healed resolved blocked dependency wakes",
       );
+    }
+
+    return result;
+  }
+
+  async function reconcileIssueGraphLiveness(opts?: {
+    runId?: string | null;
+    force?: boolean;
+    lookbackHours?: number;
+    issueCreatedAtGte?: Date | null;
+    now?: Date;
+    reescalationCooldownMs?: number;
+  }) {
+    let findings = await collectIssueGraphLivenessFindings();
+    if (opts?.issueCreatedAtGte) {
+      const findingIssueIds = [...new Set(findings.map((finding) => finding.recoveryIssueId))];
+      const eligibleIssueIds = new Set(
+        findingIssueIds.length === 0
+          ? []
+          : (await db
+              .select({ id: issues.id })
+              .from(issues)
+              .where(and(
+                inArray(issues.id, findingIssueIds),
+                gte(issues.createdAt, opts.issueCreatedAtGte),
+              )))
+              .map((issue) => issue.id),
+      );
+      findings = findings.filter((finding) => eligibleIssueIds.has(finding.recoveryIssueId));
+    }
+    // Filter out findings for pipeline-managed issues — issues linked to
+    // non-terminal pipeline cases (role=work or conversation) have their
+    // lifecycle owned by the pipeline's stage gates, not by liveness recovery.
+    // Without this, the liveness system creates spurious escalations when a
+    // pipeline agent's run ends normally between stages.
+    if (findings.length > 0) {
+      const findingIssueIds = [...new Set(findings.map((finding) => finding.recoveryIssueId))];
+      const pipelineManagedIssueIds = new Set(
+        findingIssueIds.length === 0
+          ? []
+          : (await db
+              .select({ id: pipelineCaseIssueLinks.issueId })
+              .from(pipelineCaseIssueLinks)
+              .innerJoin(pipelineCases, eq(pipelineCases.id, pipelineCaseIssueLinks.caseId))
+              .where(and(
+                eq(pipelineCaseIssueLinks.companyId, findings[0]!.companyId),
+                inArray(pipelineCaseIssueLinks.issueId, findingIssueIds),
+                isNull(pipelineCaseIssueLinks.retiredAt),
+                inArray(pipelineCaseIssueLinks.role, ["work", "conversation"]),
+                isNull(pipelineCases.terminalKind),
+              )))
+              .map((row) => row.issueId),
+      );
+      if (pipelineManagedIssueIds.size > 0) {
+        findings = findings.filter((finding) => !pipelineManagedIssueIds.has(finding.recoveryIssueId));
+      }
+    }
+    const experimentalSettings = await instanceSettings.getExperimental();
+    const autoRecoveryEnabled = asBoolean(
+      experimentalSettings.enableIssueGraphLivenessAutoRecovery,
+      true,
+    ) || opts?.force === true;
+    const lookbackHours = normalizeIssueGraphLivenessAutoRecoveryLookbackHours(
+      opts?.lookbackHours ?? experimentalSettings.issueGraphLivenessAutoRecoveryLookbackHours,
+    );
+    const now = opts?.now ?? new Date();
+    const reescalationCooldownMs = Math.max(
+      0,
+      Math.floor(asNumber(opts?.reescalationCooldownMs, DEFAULT_LIVENESS_REESCALATION_COOLDOWN_MS)),
+    );
+    const cutoff = new Date(now.getTime() - lookbackHours * 60 * 60 * 1000);
+    const obsoleteRecoveryCleanup = await retireObsoleteLivenessRecoveryIssues(findings);
+    const doneRecoveryBlockerCleanup = await retireDoneLivenessRecoveryBlockers();
+    const updatedAtByIssueKey = await loadLivenessDependencyUpdatedAtByIssue(findings);
+    const result = {
+      findings: findings.length,
+      autoRecoveryEnabled,
+      lookbackHours,
+      cutoff: cutoff.toISOString(),
+      escalationsCreated: 0,
+      existingEscalations: 0,
+      skipped: 0,
+      skippedAutoRecoveryDisabled: 0,
+      skippedOutsideLookback: 0,
+      skippedReescalationCooldown: 0,
+      obsoleteRecoveriesRetired: obsoleteRecoveryCleanup.retired,
+      obsoleteRecoveriesActiveSkipped: obsoleteRecoveryCleanup.activeSkipped,
+      obsoleteRecoveryBlockerRelationsRemoved: obsoleteRecoveryCleanup.blockerRelationsRemoved,
+      doneRecoveryBlockerRelationsRemoved: doneRecoveryBlockerCleanup.blockerRelationsRemoved,
+      dependencyWakeBackstopChecked: 0,
+      dependencyWakesHealed: 0,
+      dependencyWakeExistingSkipped: 0,
+      dependencyWakeLivePathSkipped: 0,
+      dependencyWakeInteractionSkipped: 0,
+      dependencyWakePauseHoldSkipped: 0,
+      dependencyWakeNotReadySkipped: 0,
+      dependencyWakeCandidateLimitSkipped: 0,
+      dependencyWakeDeferredOrFailed: 0,
+      dependencyWakeEnqueueFailed: 0,
+      dependencyWakeIssueIds: [] as string[],
+      issueIds: [] as string[],
+      escalationIssueIds: [] as string[],
+      retiredRecoveryIssueIds: obsoleteRecoveryCleanup.retiredIssueIds,
+    };
+
+    const dependencyWakeBackstop = await reconcileResolvedDependencyWakeBackstop({
+      runId: opts?.runId ?? null,
+    });
+    result.dependencyWakeBackstopChecked = dependencyWakeBackstop.checked;
+    result.dependencyWakesHealed = dependencyWakeBackstop.healed;
+    result.dependencyWakeExistingSkipped = dependencyWakeBackstop.existingWakeSkipped;
+    result.dependencyWakeLivePathSkipped = dependencyWakeBackstop.livePathSkipped;
+    result.dependencyWakeInteractionSkipped = dependencyWakeBackstop.interactionSkipped;
+    result.dependencyWakePauseHoldSkipped = dependencyWakeBackstop.pauseHoldSkipped;
+    result.dependencyWakeNotReadySkipped = dependencyWakeBackstop.notReadySkipped;
+    result.dependencyWakeCandidateLimitSkipped = dependencyWakeBackstop.candidateLimitSkipped;
+    result.dependencyWakeDeferredOrFailed = dependencyWakeBackstop.deferredOrFailed;
+    result.dependencyWakeEnqueueFailed = dependencyWakeBackstop.enqueueFailed;
+    result.dependencyWakeIssueIds = dependencyWakeBackstop.issueIds;
+
+    if (!autoRecoveryEnabled) {
+      result.skippedAutoRecoveryDisabled = findings.length;
+      return result;
+    }
+
+    for (const finding of findings) {
+      if (!isLivenessFindingInsideAutoRecoveryLookback(finding, cutoff, updatedAtByIssueKey)) {
+        result.skippedOutsideLookback += 1;
+        result.skipped += 1;
+        continue;
+      }
+      const escalation = await createIssueGraphLivenessEscalation({
+        finding,
+        runId: opts?.runId ?? null,
+        now,
+        reescalationCooldownMs,
+      });
+      if (escalation.kind === "created") {
+        result.escalationsCreated += 1;
+        result.issueIds.push(finding.issueId);
+        result.escalationIssueIds.push(escalation.escalationIssueId);
+      } else if (escalation.kind === "existing") {
+        result.existingEscalations += 1;
+        result.issueIds.push(finding.issueId);
+        result.escalationIssueIds.push(escalation.escalationIssueId);
+      } else if (escalation.kind === "cooldown") {
+        result.skippedReescalationCooldown += 1;
+        result.skipped += 1;
+      } else {
+        result.skipped += 1;
+      }
     }
 
     return result;
