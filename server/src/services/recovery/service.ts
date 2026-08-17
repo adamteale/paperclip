@@ -26,6 +26,8 @@ import {
   issueRelations,
   issueThreadInteractions,
   issues,
+  pipelineCaseIssueLinks,
+  pipelineCases,
 } from "@paperclipai/db";
 import { parseObject, asBoolean, asNumber } from "../../adapters/utils.js";
 import { runningProcesses } from "../../adapters/index.js";
@@ -5381,6 +5383,33 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
               .map((issue) => issue.id),
       );
       findings = findings.filter((finding) => eligibleIssueIds.has(finding.recoveryIssueId));
+    }
+    // Filter out findings for pipeline-managed issues — issues linked to
+    // non-terminal pipeline cases (role=work or conversation) have their
+    // lifecycle owned by the pipeline's stage gates, not by liveness recovery.
+    // Without this, the liveness system creates spurious escalations when a
+    // pipeline agent's run ends normally between stages.
+    if (findings.length > 0) {
+      const findingIssueIds = [...new Set(findings.map((finding) => finding.recoveryIssueId))];
+      const pipelineManagedIssueIds = new Set(
+        findingIssueIds.length === 0
+          ? []
+          : (await db
+              .select({ id: pipelineCaseIssueLinks.issueId })
+              .from(pipelineCaseIssueLinks)
+              .innerJoin(pipelineCases, eq(pipelineCases.id, pipelineCaseIssueLinks.caseId))
+              .where(and(
+                eq(pipelineCaseIssueLinks.companyId, findings[0]!.companyId),
+                inArray(pipelineCaseIssueLinks.issueId, findingIssueIds),
+                isNull(pipelineCaseIssueLinks.retiredAt),
+                inArray(pipelineCaseIssueLinks.role, ["work", "conversation"]),
+                isNull(pipelineCases.terminalKind),
+              )))
+              .map((row) => row.issueId),
+      );
+      if (pipelineManagedIssueIds.size > 0) {
+        findings = findings.filter((finding) => !pipelineManagedIssueIds.has(finding.recoveryIssueId));
+      }
     }
     const experimentalSettings = await instanceSettings.getExperimental();
     const autoRecoveryEnabled = asBoolean(
