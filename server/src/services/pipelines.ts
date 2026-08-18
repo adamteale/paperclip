@@ -2335,6 +2335,17 @@ async function handleRequireApprovalStageEntry(
     await tx.update(issues)
       .set({ status: "blocked" })
       .where(and(eq(issues.id, workLink.issue.id), ne(issues.status, "done")));
+
+    // Post a comment on the mirror issue — this gets mirrored to Jira by the
+    // bidirectional comment sync, so the team sees the review request in Jira too.
+    const stageName = input.stage.name ?? input.stage.key;
+    const mirrorId = workLink.issue.id;
+    const commentBody = `⏳ **Human review required**: ${stageName}. Please review and approve/decline in Paperclip.`;
+    await tx.insert(issueComments).values({
+      companyId: input.companyId,
+      issueId: mirrorId,
+      body: commentBody,
+    }).onConflictDoNothing();
   }
 }
 
