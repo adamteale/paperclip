@@ -3172,7 +3172,6 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
             error: null,
             updatedAt: nowDate(),
           })
-        : null;
           .where(eq(pipelineAutomationExecutions.id, execution.id))
           .returning();
         await writeCaseEvent(db, {
