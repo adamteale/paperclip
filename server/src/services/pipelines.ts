@@ -3159,11 +3159,21 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         .limit(1)
         .then((rows) => rows[0] ?? null);
       if (existingIssueLink?.issueId) {
-        // Reuse the existing automation issue — reset to todo so the agent re-runs
+        // Reuse the existing automation issue — reset to todo + set assignee + wake heartbeat
         await db
           .update(issues)
-          .set({ status: "todo", updatedAt: nowDate() })
+          .set({ status: "todo", assigneeAgentId: routine.assigneeAgentId, updatedAt: nowDate() })
           .where(and(eq(issues.id, existingIssueLink.issueId), ne(issues.status, "done")));
+        // Trigger the heartbeat to re-dispatch the agent on the reused issue
+        if (deps.heartbeat && routine.assigneeAgentId) {
+          await deps.heartbeat.wakeup(routine.assigneeAgentId, {
+            source: "automation",
+            triggerDetail: "system",
+            reason: "stage_re_entry_reuse",
+            payload: { issueId: existingIssueLink.issueId, mutation: "create" },
+            requestedByActorType: "system",
+          }).catch(() => {});
+        }
         const [reused] = await db
           .update(pipelineAutomationExecutions)
           .set({
