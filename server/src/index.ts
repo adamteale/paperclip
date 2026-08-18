@@ -1332,7 +1332,7 @@ async function startServerWithDatabaseTeardown(
     // The throttle keeps the 30s cadence from flooding the log.
     let lastTerminalWorkspaceSkipLogAt = 0;
     const terminalWorkspaceSkipLogIntervalMs = 10 * 60 * 1000;
-    const pipelineGateSweeper = pipelineService(db as any);
+        const pipelineGateSweeper = pipelineService(db as any, heartbeat ? { heartbeat } : {});
     const schedulePipelineIssueGateSweep = () => {
       if (heartbeatSchedulerStopped) return;
       trackHeartbeatSchedulerWork(pipelineGateSweeper
