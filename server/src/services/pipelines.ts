@@ -3174,13 +3174,6 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
           })
           .where(eq(pipelineAutomationExecutions.id, execution.id))
           .returning();
-        await writeCaseEvent(db, {
-          companyId: execution.companyId,
-          caseId: execution.caseId,
-          type: "automation_dispatched",
-          actor,
-          payload: { automationId: execution.automationId, reusedIssueId: existingIssueLink.issueId },
-        });
         return { status: "succeeded", execution: reused! };
       }
       const run = await routinesSvc.runPipelineStageEntryRoutine(execution.routineId, {
