@@ -990,7 +990,7 @@ export async function startServer(): Promise<StartedServer> {
           logger.error({ err }, "merged pull-request confirmation sweep failed");
         }));
     };
-    const pipelineGateSweeper = pipelineService(db as any);
+    const pipelineGateSweeper = pipelineService(db as any, heartbeat ? { heartbeat } : {});
     const schedulePipelineIssueGateSweep = () => {
       if (heartbeatSchedulerStopped) return;
       trackHeartbeatSchedulerWork(pipelineGateSweeper
