@@ -3137,6 +3137,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
             caseId: execution.caseId,
             config: breakdownConfig,
           })
+        : null;
       // ── Reuse existing automation issue if one exists for this case+stage ──
       // When the pipeline cycles back to the same stage (e.g., implement -> pr_review
       // -> implement due to PR feedback), reuse the existing automation issue instead
@@ -3171,6 +3172,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
             error: null,
             updatedAt: nowDate(),
           })
+        : null;
           .where(eq(pipelineAutomationExecutions.id, execution.id))
           .returning();
         await writeCaseEvent(db, {
@@ -3902,6 +3904,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
             createdByUserId: input.actor.type === "user" ? input.actor.userId : null,
             createdByAgentId: input.actor.type === "agent" ? input.actor.agentId : null,
           })
+        : null;
           .returning();
         const insertedStages = await tx
           .insert(pipelineStages)
@@ -3988,6 +3991,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
             position: sql`${pipelineStages.position} + 100` as unknown as number,
             updatedAt: nowDate(),
           })
+        : null;
           .where(and(
             eq(pipelineStages.pipelineId, input.pipelineId),
             sql`${pipelineStages.position} >= ${input.position}`,
@@ -4002,6 +4006,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
             position: input.position,
             config: nextConfig,
           })
+        : null;
           .returning();
         const routineId = stageAutomationRoutineIdFromConfig(nextConfig);
         if (routineId) {
@@ -4061,6 +4066,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
               executionContext: automationRequest.executionContext,
               actor: input.actor ?? { type: "system" },
             })
+        : null;
           : config;
         const nextRoutineId = stageAutomationRoutineIdFromConfig(nextConfig);
         const [updated] = await tx
@@ -4071,6 +4077,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
             config: nextConfig,
             updatedAt: nowDate(),
           })
+        : null;
           .where(and(eq(pipelineStages.id, input.stageId), eq(pipelineStages.pipelineId, input.pipelineId)))
           .returning();
         if (!updated) throw notFound("Pipeline stage not found");
@@ -4148,6 +4155,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
             updatedByUserId: actorPatch.userId,
             updatedAt: nowDate(),
           })
+        : null;
           .where(and(eq(routines.id, locked.id), eq(routines.companyId, input.companyId)))
           .returning();
         if (!routineWithEnv) throw notFound("Pipeline stage automation routine not found");
@@ -4220,6 +4228,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
               terminalAt: isTerminalKind(targetStage.kind) ? nowDate() : null,
               updatedAt: nowDate(),
             })
+        : null;
             .where(and(eq(pipelineCases.pipelineId, input.pipelineId), eq(pipelineCases.stageId, stage.id)))
             .returning();
           for (const movedCase of movedCases) {
@@ -4388,6 +4397,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
             createdByAgentId: input.actor.type === "agent" ? input.actor.agentId : null,
             originRunId: input.actor.type === "agent" ? input.actor.runId : null,
           })
+        : null;
           .onConflictDoNothing()
           .returning();
 
@@ -4538,6 +4548,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
                 linkedCaseId: refCase.id,
                 role: "reference",
               })
+        : null;
               .onConflictDoNothing({ target: [pipelineCaseCaseLinks.caseId, pipelineCaseCaseLinks.linkedCaseId] });
           }
         } catch (e) {
@@ -4871,6 +4882,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
             leaseExpiresAt: expiresAt,
             updatedAt: nowDate(),
           })
+        : null;
           .where(eq(pipelineCases.id, current.id))
           .returning();
         await writeCaseEvent(tx, {
@@ -4907,6 +4919,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
             leaseExpiresAt: null,
             updatedAt: nowDate(),
           })
+        : null;
           .where(eq(pipelineCases.id, current.id))
           .returning();
         await writeCaseEvent(tx, {
@@ -5153,6 +5166,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
               parentCaseId: pipelineCases.parentCaseId,
               terminalKind: pipelineCases.terminalKind,
             })
+        : null;
             .from(pipelineCases)
             .where(and(
               eq(pipelineCases.companyId, input.companyId),
@@ -5173,6 +5187,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
               updatedAt: now,
               version: sql`${pipelineCases.version} + 1` as unknown as number,
             })
+        : null;
             .where(and(
               eq(pipelineCases.companyId, input.companyId),
               inArray(pipelineCases.id, uniqueRetireCaseIds),
@@ -5224,6 +5239,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
               retiredReason: "automation_retry",
               updatedAt: now,
             })
+        : null;
             .where(and(
               eq(pipelineCaseIssueLinks.companyId, input.companyId),
               inArray(pipelineCaseIssueLinks.issueId, issueIdsToCancel),
@@ -5254,6 +5270,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
               version: sql`${pipelineCases.version} + 1` as unknown as number,
               updatedAt: now,
             })
+        : null;
             .where(and(eq(pipelineCases.id, input.caseId), eq(pipelineCases.companyId, input.companyId)))
             .returning();
           updatedCase = updated!;
