@@ -3183,7 +3183,6 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         });
         return { status: "succeeded", execution: reused! };
       }
-        : null;
       const run = await routinesSvc.runPipelineStageEntryRoutine(execution.routineId, {
         source: "api",
         assigneeAgentId: routine.assigneeAgentId,
