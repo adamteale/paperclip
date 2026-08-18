@@ -2264,6 +2264,80 @@ async function enqueueStageAutomationLedger(
   return ledger ?? null;
 }
 
+/**
+ * When a case enters a requireApproval stage, automatically create a
+ * request_confirmation interaction on the linked automation issue + set the
+ * mirror (work-linked) issue to 'blocked'. This surfaces the review gate
+ * on the Issues board with an Approve/Decline button — no manual
+ * intervention needed.
+ */
+async function handleRequireApprovalStageEntry(
+  tx: PipelineDb,
+  input: {
+    companyId: string;
+    caseId: string;
+    stage: typeof pipelineStages.$inferSelect;
+  },
+) {
+  const config = normalizeStageConfig(input.stage.kind, stageConfig(input.stage));
+  if (config.requireApproval !== true) return;
+
+  // Find the automation issue linked to this case
+  const automationLink = await resolveLatestCaseIssueLink(tx, {
+    companyId: input.companyId,
+    caseId: input.caseId,
+    roles: ["automation"],
+    reasonByRole: { automation: "automation_link" },
+  });
+
+  // Find the work-linked mirror issue (the ticket the user sees)
+  const workLink = await resolveLatestCaseIssueLink(tx, {
+    companyId: input.companyId,
+    caseId: input.caseId,
+    roles: ["work"],
+    reasonByRole: { work: "automation_link" },
+  });
+
+  // Create interaction on the automation issue (or work issue as fallback)
+  const targetIssueId = automationLink?.issue?.id ?? workLink?.issue?.id ?? null;
+  if (!targetIssueId) return;
+
+  // Skip if there's already a pending request_confirmation on this issue
+  const existing = await tx
+    .select({ id: issueThreadInteractions.id })
+    .from(issueThreadInteractions)
+    .where(and(
+      eq(issueThreadInteractions.issueId, targetIssueId),
+      eq(issueThreadInteractions.kind, "request_confirmation"),
+      eq(issueThreadInteractions.status, "pending"),
+    ))
+    .limit(1);
+  if (existing.length > 0) return;
+
+  // Create the request_confirmation interaction
+  const stageName = input.stage.name ?? input.stage.key;
+  await tx.insert(issueThreadInteractions).values({
+    companyId: input.companyId,
+    issueId: targetIssueId,
+    kind: "request_confirmation",
+    status: "pending",
+    title: `Review: ${stageName}`,
+    summary: `Pipeline case entered ${stageName}. Please review and approve to advance, or decline to send back.`,
+    payload: {
+      version: 1,
+      title: `Review: ${stageName}`,
+      prompt: `Please review and approve the ${stageName} stage to advance the pipeline.`,
+    } as any,
+  });
+
+  // Set the mirror/work issue to 'blocked' so it's visible on the Issues board
+  if (workLink?.issue?.id && workLink.issue.id !== targetIssueId) {
+    await tx.update(issues)
+      .set({ status: "blocked" })
+      .where(and(eq(issues.id, workLink.issue.id), ne(issues.status, "done")));
+  }
+}
+
 async function resolveAutomationAttemptForActorRun(db: PipelineDb, companyId: string, runId?: string | null) {
   if (!runId) return null;
   const row = await db
@@ -3454,6 +3528,15 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       eventId: event.id,
     });
     if (ledger) input.automationLedgers?.push(ledger);
+    // When entering a requireApproval stage, create a request_confirmation
+    // interaction on the linked issue + set the mirror issue to blocked.
+    // This surfaces the review gate on the Issues board (visible as 'blocked')
+    // with an Approve/Decline interaction — no manual intervention needed.
+    await handleRequireApprovalStageEntry(tx, {
+      companyId: input.companyId,
+      caseId: current.id,
+      stage: toStage,
+    });
     const wasTerminal = isTerminalKind(current.terminalKind);
     const isTerminal = isTerminalKind(updated.terminalKind);
     if (current.parentCaseId && wasTerminal !== isTerminal) {
