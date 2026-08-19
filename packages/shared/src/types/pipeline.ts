@@ -225,6 +225,7 @@ export interface PipelineCaseOutputItemBase {
   sourceIssuePath: string;
   sourceIssueTitle: string;
   sourceIssueStatus: string;
+  sourceKind?: "issue" | "case";
   sourceRole: PipelineCaseOutputSourceRole;
   sourceTrust?: SourceTrustMetadata | null;
   sourceRunId: string | null;
