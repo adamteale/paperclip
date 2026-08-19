@@ -218,9 +218,10 @@ const createIssueLinkSchema = z.object({
   issueId: z.string().guid(),
   role: issueLinkRoleSchema,
 });
+const caseLinkRoleSchema = z.enum(["origin", "conversation", "work", "automation", "reference"]);
 const createCaseLinkSchema = z.object({
   linkedCaseId: z.string().uuid(),
-  role: z.string().trim().min(1).max(120),
+  role: caseLinkRoleSchema,
 });
 const bulkReviewSchema = z.object({
   items: z.array(reviewCaseSchema.extend({ caseId: z.string().guid() })).max(100),

@@ -201,7 +201,7 @@ export interface PipelineCaseDocumentRevision {
   createdAt: Date | string;
 }
 
-export type PipelineCaseOutputSourceRole = "origin" | "conversation" | "work" | "automation";
+export type PipelineCaseOutputSourceRole = "origin" | "conversation" | "work" | "automation" | "reference";
 export type PipelineCaseOutputKind = "document" | "work_product" | "attachment";
 
 export interface PipelineCaseOutputSource {

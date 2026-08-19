@@ -4066,32 +4066,32 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       });
       const automationExecutions = await executeAutomationLedgers(automationLedgers, { type: "system" });
       // Auto-link approved reference Cases (caseType starting with 'reference_')
-      // to this newly created pipeline case so agents see reference documents
-      // in their context. Best-effort: failures must not block case creation.
-      if (result.created) {
-        try {
-          const referenceCases = await db
-            .select({ id: cases.id })
-            .from(cases)
-            .where(and(
-              eq(cases.companyId, input.companyId),
-              eq(cases.status, "approved"),
-              sql`${cases.caseType} LIKE 'reference_%'`,
-            ));
-          for (const refCase of referenceCases) {
-            await db
-              .insert(pipelineCaseCaseLinks)
-              .values({
-                companyId: input.companyId,
-                caseId: result.case.id,
-                linkedCaseId: refCase.id,
-                role: "reference",
-              })
-              .onConflictDoNothing({ target: [pipelineCaseCaseLinks.caseId, pipelineCaseCaseLinks.linkedCaseId] });
-          }
-        } catch (e) {
-          // Best-effort: don't block case creation if auto-linking fails
+      // to this pipeline case so agents see reference documents in their context.
+      // Runs on both initial creation and retries (idempotent via onConflictDoNothing).
+      // Best-effort: failures must not block case creation.
+      try {
+        const referenceCases = await db
+          .select({ id: cases.id })
+          .from(cases)
+          .where(and(
+            eq(cases.companyId, input.companyId),
+            eq(cases.status, "approved"),
+            sql`${cases.caseType} LIKE 'reference_%'`,
+          ));
+        for (const refCase of referenceCases) {
+          await db
+            .insert(pipelineCaseCaseLinks)
+            .values({
+              companyId: input.companyId,
+              caseId: result.case.id,
+              linkedCaseId: refCase.id,
+              role: "reference",
+            })
+            .onConflictDoNothing({ target: [pipelineCaseCaseLinks.caseId, pipelineCaseCaseLinks.linkedCaseId] });
         }
+      } catch (e) {
+        // Best-effort: don't block case creation if auto-linking fails, but log for diagnostics
+        console.warn(`[pipelines] auto-link reference cases failed for case ${result.case.id}:`, e);
       }
       if ("automationLedger" in result && result.automationLedger) {
         return {

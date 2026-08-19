@@ -15,6 +15,7 @@ import {
   pipelineCaseCaseLinks,
   pipelineCaseIssueLinks,
   pipelineCases,
+  cases,
 } from "@paperclipai/db";
 import {
   SYSTEM_ISSUE_DOCUMENT_KEYS,
@@ -532,11 +533,18 @@ export function pipelineCaseOutputsService(db: Db) {
             updatedByAgentId: documents.updatedByAgentId,
             createdAt: caseDocuments.createdAt,
             updatedAt: caseDocuments.updatedAt,
+            linkedCaseIdentifier: cases.identifier,
+            linkedCaseTitle: cases.title,
+            linkedCaseStatus: cases.status,
           })
           .from(caseDocuments)
           .innerJoin(documents, and(
             eq(caseDocuments.documentId, documents.id),
             eq(documents.companyId, caseDocuments.companyId),
+          ))
+          .innerJoin(cases, and(
+            eq(cases.id, caseDocuments.caseId),
+            eq(cases.companyId, caseDocuments.companyId),
           ))
           .leftJoin(latestRevision, and(
             eq(latestRevision.id, documents.latestRevisionId),
@@ -553,12 +561,12 @@ export function pipelineCaseOutputsService(db: Db) {
             id: `case_document:${row.documentId}`,
             kind: "document",
             title: row.title ?? row.key,
-            sourceIssueId: "",
-            sourceIssueIdentifier: "",
-            sourceIssuePath: "",
-            sourceIssueTitle: "",
-            sourceIssueStatus: "",
-            sourceRole: (link?.role ?? "conversation") as PipelineCaseOutputSourceRole,
+            sourceIssueId: row.caseId,
+            sourceIssueIdentifier: row.linkedCaseIdentifier,
+            sourceIssuePath: `/api/cases/${row.caseId}`,
+            sourceIssueTitle: row.linkedCaseTitle,
+            sourceIssueStatus: row.linkedCaseStatus,
+            sourceRole: (link?.role ?? "reference") as PipelineCaseOutputSourceRole,
             sourceTrust: row.sourceTrust ?? null,
             sourceRunId: null,
             sourceAgentId: row.updatedByAgentId ?? row.createdByAgentId,
