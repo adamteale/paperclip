@@ -14524,7 +14524,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     });
     const { executionWorkspace, reusedExecutionWorkspace, policy: resolvedWorkspaceReusePolicy } =
       await provisionExecutionWorkspaceForFreshnessDecision<RealizedExecutionWorkspace>({
-        requestedShouldReuseExisting,
+        // Only attempt reuse when the referenced workspace is actually available
+        // (found + not archived) — not just when the issue is configured to want
+        // reuse. Otherwise a workspace that vanished after its creating run ended
+        // (orphaned reuse_existing binding) throws "could not be restored" and
+        // blocks every subsequent run on the issue, instead of self-healing to a
+        // freshly realized workspace. Same philosophy as patch 0048
+        // (self-healing-worktree), applied to the ID-lookup reuse path.
+        requestedShouldReuseExisting: requestedShouldReuseExisting && Boolean(reusableExistingExecutionWorkspace),
         existingExecutionWorkspaceId: workspaceReuseRequest.requestedExecutionWorkspaceId,
         issueRef,
         runId: run.id,
