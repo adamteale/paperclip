@@ -15021,8 +15021,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     } else {
       delete context.paperclipRuntimeServiceIntents;
     }
-    if (executionWorkspace.projectId && !readNonEmptyString(context.projectId)) {
-      context.projectId = executionWorkspace.projectId;
+    if (!readNonEmptyString(context.projectId)) {
+      // Prefer the realized workspace's projectId, but fall back to the
+      // issue's own (always-populated) projectId rather than leaving this
+      // unset. An unset context.projectId propagates all the way to the
+      // adapter's runContext, and every plugin-tool call (open_design_create,
+      // create_pr, etc.) then fails with "runContext must include ...
+      // projectId" — a confusing tool-level error whose real cause is here.
+      context.projectId = executionWorkspace.projectId || issueRef?.projectId || null;
     }
     const runtimeSessionFallback = taskKey || resetTaskSession
       ? null
