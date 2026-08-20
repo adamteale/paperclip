@@ -1021,6 +1021,30 @@ export function pluginRoutes(
       return;
     }
 
+    if (!runContext.projectId && typeof (parameters as Record<string, unknown> | undefined)?.issueId === "string") {
+      // The adapter-injected runContext.projectId is sourced from the
+      // execution workspace / issue context resolved at run-dispatch time,
+      // which can legitimately be empty (e.g. a generic on-demand wakeup
+      // with no issue-scoped context yet, or an issueRef whose own
+      // projectId column wasn't carried through). Many plugin tools
+      // (open_design_create, figma_get_frames, paperclip_upsert_document,
+      // etc.) take an explicit issueId argument that DOES reliably resolve
+      // to a real project via a fresh DB lookup — use it as a fallback
+      // instead of rejecting a call the agent itself has enough context to
+      // make correctly.
+      try {
+        const targetIssue = await issueService.getById(
+          (parameters as Record<string, unknown>).issueId as string,
+        );
+        if (targetIssue?.projectId) {
+          runContext.projectId = targetIssue.projectId;
+        }
+      } catch {
+        // Best-effort fallback only — fall through to the standard
+        // validation error below if the lookup itself fails.
+      }
+    }
+
     if (!runContext.agentId || !runContext.runId || !runContext.companyId || !runContext.projectId) {
       res.status(400).json({
         error: '"runContext" must include agentId, runId, companyId, and projectId',
