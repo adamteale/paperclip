@@ -8485,6 +8485,36 @@ export function issueRoutes(
         reviewPolicy: effectiveReviewPolicy,
       });
     }
+    // Guard against an agent marking a case-tracked issue done while its own
+    // pipeline case is still mid-flight. Without this, an agent woken by an
+    // accepted review interaction (or by any other reason) can independently
+    // decide the whole issue is "done" — skipping whatever stages/automation
+    // (e.g. implement, pr_review, ci_gate) the case still has ahead of it —
+    // because nothing here previously stopped it from writing status=done
+    // directly. Confirmed root cause of DAI-183/184/185/187 on the DAI
+    // instance (2026-08-21): each closed with no implementation because its
+    // pipeline case had gone missing or was still open, and the agent
+    // improvised a "done" disposition with no case-driven next step to defer
+    // to. Human/board actors are exempt — this only restrains agent
+    // self-judgment, not human authority to force-close something.
+    if (
+      req.actor.type === "agent"
+      && updateFields.status === "done"
+      && existing.status !== "done"
+    ) {
+      const linkedCases = await listIssueLinkedCases(db, existing.companyId, existing.id);
+      const openWorkCase = linkedCases.find((c) => c.role === "work" && c.status === "open");
+      if (openWorkCase) {
+        throw unprocessable(
+          "Cannot mark this issue done while its pipeline case is still open. Advance the case to its terminal stage (e.g. via a stage transition) instead of setting the issue status directly.",
+          {
+            code: "issue_done_blocked_by_open_case",
+            caseId: openWorkCase.id,
+            caseStageKey: openWorkCase.stage.key,
+          },
+        );
+      }
+    }
     const shouldCancelActiveRunForCancelledStatus =
       existing.status !== "cancelled" && updateFields.status === "cancelled";
     if (resumeRequested === true && !commentBody) {
