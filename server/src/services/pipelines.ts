@@ -1552,23 +1552,36 @@ async function writeCaseEvent(
   // transitions/claims/reviews land only in pipeline_case_events and the
   // Pipelines board requires a manual refresh. Best-effort by design: activity
   // mirroring must never break the case event itself.
+  //
+  // IMPORTANT: we are inside a Postgres transaction. A plain try/catch is NOT
+  // sufficient — any failing INSERT puts the whole transaction into "aborted"
+  // state so subsequent queries (e.g. adjustParentCounts) also fail, even
+  // though JS caught the error. We use a SAVEPOINT to isolate the insert:
+  // on success RELEASE cleans it up; on failure ROLLBACK TO restores the
+  // transaction to a clean state so the caller's work continues normally.
   try {
     const actor = eventActorPatch(input.actor);
-    await logActivity(db as Db, {
-      companyId: input.companyId,
-      actorType: actor.actorType as "agent" | "user" | "system",
-      actorId: actor.actorAgentId ?? actor.actorUserId ?? "system",
-      agentId: actor.actorAgentId ?? null,
-      runId: actor.runId ?? null,
-      action: `pipeline.case_${input.type}`,
-      entityType: "pipeline_case",
-      entityId: input.caseId,
-      details: {
-        fromStageId: input.fromStageId ?? null,
-        toStageId: input.toStageId ?? null,
-        ...(input.payload ?? {}),
-      },
-    });
+    await db.execute(sql`SAVEPOINT pipeline_case_event_activity_log_sp`);
+    try {
+      await logActivity(db as Db, {
+        companyId: input.companyId,
+        actorType: actor.actorType as "agent" | "user" | "system",
+        actorId: actor.actorAgentId ?? actor.actorUserId ?? "system",
+        agentId: actor.actorAgentId ?? null,
+        runId: actor.runId ?? null,
+        action: `pipeline.case_${input.type}`,
+        entityType: "pipeline_case",
+        entityId: input.caseId,
+        details: {
+          fromStageId: input.fromStageId ?? null,
+          toStageId: input.toStageId ?? null,
+          ...(input.payload ?? {}),
+        },
+      });
+      await db.execute(sql`RELEASE SAVEPOINT pipeline_case_event_activity_log_sp`);
+    } catch {
+      await db.execute(sql`ROLLBACK TO SAVEPOINT pipeline_case_event_activity_log_sp`);
+    }
   } catch {
     // best-effort — see comment above
   }
