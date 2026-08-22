@@ -563,7 +563,7 @@ export function pipelineCaseOutputsService(db: Db) {
             title: row.title ?? row.key,
             sourceIssueId: row.caseId,
             sourceIssueIdentifier: row.linkedCaseIdentifier,
-            sourceIssuePath: `/cases/${row.caseId}`,
+            sourceIssuePath: `/cases/${encodeURIComponent(row.linkedCaseIdentifier)}`,
             sourceIssueTitle: row.linkedCaseTitle,
             sourceIssueStatus: row.linkedCaseStatus,
             sourceKind: "case",
