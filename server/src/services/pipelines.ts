@@ -2309,19 +2309,26 @@ async function handleRequireApprovalStageEntry(
   // or cases where links were lost during manual stage reverts), find the most
   // recent routine_execution issue whose title contains the case title.
   if (!targetIssueId && input.caseTitle) {
-    const fallback = await tx
-      .select({ id: issues.id })
-      .from(issues)
-      .where(and(
-        eq(issues.companyId, input.companyId),
-        eq(issues.originKind, "routine_execution"),
-        sql`${issues.title} ILIKE ${"%" + input.caseTitle + "%"}`,
-        ne(issues.status, "cancelled"),
-      ))
-      .orderBy(desc(issues.createdAt))
-      .limit(1);
-    if (fallback.length > 0) {
-      targetIssueId = fallback[0].id;
+    console.log(`[handleRequireApprovalStageEntry] fallback search: caseTitle="${input.caseTitle}"`);
+    try {
+      const pattern = `%${input.caseTitle}%`;
+      const fallback = await tx
+        .select({ id: issues.id, title: issues.title, status: issues.status })
+        .from(issues)
+        .where(and(
+          eq(issues.companyId, input.companyId),
+          eq(issues.originKind, "routine_execution"),
+          sql`${issues.title} ILIKE ${pattern}`,
+          ne(issues.status, "cancelled"),
+        ))
+        .orderBy(desc(issues.createdAt))
+        .limit(1);
+      console.log(`[handleRequireApprovalStageEntry] fallback results: ${JSON.stringify(fallback)}`);
+      if (fallback.length > 0) {
+        targetIssueId = fallback[0].id;
+      }
+    } catch (e) {
+      console.error(`[handleRequireApprovalStageEntry] fallback query error: ${String(e)}`);
     }
   }
 
