@@ -66,7 +66,7 @@ The `deploy_production` node deploys to permanent subdomains (`{companySlug}.rob
   - Paperclip API: `http://127.0.0.1:3100/api` (on server)
   - Paperclip UI: `https://robotpants.ddns.net:9444`
   - DB: `PGPASSWORD=paperclip psql -h 127.0.0.1 -p 54329 -U paperclip -d paperclip`
-- **GCP Daily Foods:** `ssh -i ~/.ssh/google_compute_engine adamteale@136.119.205.29`
+- **GCP Daily Foods:** `gcloud compute ssh paperclip-orchestrator --zone=us-central1-a --tunnel-through-iap` (direct SSH on port 22 is blocked; always use IAP)
   - Paperclip UI: `https://paperclip.136-119-205-29.sslip.io`
   - Open Design: `https://od.136-119-205-29.sslip.io`
   - Daily Foods company ID: `29d6c3fd-03d3-43ed-a010-3b2afdff3465`
