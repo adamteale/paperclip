@@ -2280,6 +2280,7 @@ async function handleRequireApprovalStageEntry(
     companyId: string;
     caseId: string;
     stage: typeof pipelineStages.$inferSelect;
+    caseTitle?: string;
   },
 ) {
   const config = normalizeStageConfig(input.stage.kind, stageConfig(input.stage));
@@ -2302,7 +2303,28 @@ async function handleRequireApprovalStageEntry(
   });
 
   // Create interaction on the automation issue (or work issue as fallback)
-  const targetIssueId = automationLink?.issue?.id ?? workLink?.issue?.id ?? null;
+  let targetIssueId = automationLink?.issue?.id ?? workLink?.issue?.id ?? null;
+
+  // Fallback: if no issue links exist (e.g. useOriginIssue cases without explicit links,
+  // or cases where links were lost during manual stage reverts), find the most
+  // recent routine_execution issue whose title contains the case title.
+  if (!targetIssueId && input.caseTitle) {
+    const fallback = await tx
+      .select({ id: issues.id })
+      .from(issues)
+      .where(and(
+        eq(issues.companyId, input.companyId),
+        eq(issues.originKind, "routine_execution"),
+        sql`${issues.title} ILIKE ${"%" + input.caseTitle + "%"}`,
+        ne(issues.status, "cancelled"),
+      ))
+      .orderBy(desc(issues.createdAt))
+      .limit(1);
+    if (fallback.length > 0) {
+      targetIssueId = fallback[0].id;
+    }
+  }
+
   if (!targetIssueId) return;
 
   // Skip if there's already a pending request_confirmation on this issue
@@ -3628,6 +3650,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       companyId: input.companyId,
       caseId: current.id,
       stage: toStage,
+      caseTitle: current.title ?? undefined,
     });
     const wasTerminal = isTerminalKind(current.terminalKind);
     const isTerminal = isTerminalKind(updated.terminalKind);
