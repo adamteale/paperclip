@@ -2313,8 +2313,8 @@ async function handleRequireApprovalStageEntry(
   // recent routine_execution issue whose title contains the case title.
   if (!targetIssueId && input.caseTitle) {
     try {
-      require('fs').appendFileSync('/tmp/pipeline-debug.log', `[${new Date().toISOString()}] fallback search: caseTitle="${input.caseTitle}" companyId=${input.companyId}\n`);
       const pattern = `%${input.caseTitle}%`;
+      process.stdout.write(`[handleRequireApprovalStageEntry] fallback query: pattern=${pattern}\n`);
       const fallback = await tx
         .select({ id: issues.id, title: issues.title, status: issues.status })
         .from(issues)
@@ -2326,12 +2326,12 @@ async function handleRequireApprovalStageEntry(
         ))
         .orderBy(desc(issues.createdAt))
         .limit(1);
-      require('fs').appendFileSync('/tmp/pipeline-debug.log', `[${new Date().toISOString()}] fallback results: ${JSON.stringify(fallback)}\n`);
+      process.stdout.write(`[handleRequireApprovalStageEntry] fallback results: ${JSON.stringify(fallback)}\n`);
       if (fallback.length > 0) {
         targetIssueId = fallback[0].id;
       }
     } catch (e) {
-      require('fs').appendFileSync('/tmp/pipeline-debug.log', `[${new Date().toISOString()}] fallback error: ${String(e)}\n`);
+      process.stdout.write(`[handleRequireApprovalStageEntry] fallback ERROR: ${String(e)}\n`);
     }
   }
 
