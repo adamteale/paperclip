@@ -2307,6 +2307,7 @@ async function handleRequireApprovalStageEntry(
 
   // Create interaction on the automation issue (or work issue as fallback)
   let targetIssueId = automationLink?.issue?.id ?? workLink?.issue?.id ?? null;
+  process.stdout.write(`[handleRequireApprovalStageEntry] automationLink=${automationLink?.issue?.id ?? 'null'} workLink=${workLink?.issue?.id ?? 'null'} targetIssueId=${targetIssueId ?? 'null'} caseTitle=${input.caseTitle ?? 'undefined'}\n`);
 
   // Fallback: if no issue links exist (e.g. useOriginIssue cases without explicit links,
   // or cases where links were lost during manual stage reverts), find the most
