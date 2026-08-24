@@ -2360,7 +2360,7 @@ async function handleRequireApprovalStageEntry(
     payload: {
       version: 1,
       title: `Review: ${stageName}`,
-      prompt: `Please review and approve the ${stageName} stage to advance the pipeline.`,
+      prompt: `Please review the screenshots and design links in the comments above, then approve the ${stageName} stage to advance the pipeline.`,
     } as any,
   });
 
