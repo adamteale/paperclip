@@ -2286,9 +2286,6 @@ async function handleRequireApprovalStageEntry(
   const config = normalizeStageConfig(input.stage.kind, stageConfig(input.stage));
   if (config.requireApproval !== true) return;
 
-  // DEBUG: throw to test if this function is actually called
-  process.stdout.write(`[handleRequireApprovalStageEntry] CALLED for case ${input.caseId} stage ${input.stage.key} caseTitle=${input.caseTitle ?? 'undefined'}\n`);
-
   // Find the automation issue linked to this case
   const automationLink = await resolveLatestCaseIssueLink(tx, {
     companyId: input.companyId,
@@ -2307,15 +2304,16 @@ async function handleRequireApprovalStageEntry(
 
   // Create interaction on the automation issue (or work issue as fallback)
   let targetIssueId = automationLink?.issue?.id ?? workLink?.issue?.id ?? null;
-  process.stdout.write(`[handleRequireApprovalStageEntry] automationLink=${automationLink?.issue?.id ?? 'null'} workLink=${workLink?.issue?.id ?? 'null'} targetIssueId=${targetIssueId ?? 'null'} caseTitle=${input.caseTitle ?? 'undefined'}\n`);
 
-  // Fallback: if no issue links exist (e.g. useOriginIssue cases without explicit links,
-  // or cases where links were lost during manual stage reverts), find the most
-  // recent routine_execution issue whose title contains the case title.
-  if (!targetIssueId && input.caseTitle) {
+  // Fallback: if no issue links exist, OR the found issue is done/cancelled
+  // (e.g. a feature brief from an earlier stage), find the most recent
+  // non-done routine_execution issue whose title contains the case title.
+  // This ensures the interaction is created on the issue the user is actually
+  // reviewing, not a stale issue from a previous stage.
+  const targetIsStale = targetIssueId && (automationLink?.issue?.status === "done" || automationLink?.issue?.status === "cancelled");
+  if ((!targetIssueId || targetIsStale) && input.caseTitle) {
     try {
       const pattern = `%${input.caseTitle}%`;
-      process.stdout.write(`[handleRequireApprovalStageEntry] fallback query: pattern=${pattern}\n`);
       const fallback = await tx
         .select({ id: issues.id, title: issues.title, status: issues.status })
         .from(issues)
@@ -2324,10 +2322,10 @@ async function handleRequireApprovalStageEntry(
           eq(issues.originKind, "routine_execution"),
           sql`${issues.title} ILIKE ${pattern}`,
           ne(issues.status, "cancelled"),
+          ne(issues.status, "done"),
         ))
         .orderBy(desc(issues.createdAt))
         .limit(1);
-      process.stdout.write(`[handleRequireApprovalStageEntry] fallback results: ${JSON.stringify(fallback)}\n`);
       if (fallback.length > 0) {
         targetIssueId = fallback[0].id;
       }
