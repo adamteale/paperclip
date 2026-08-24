@@ -31,6 +31,9 @@ export const pipelineStageOnEnterSchema = z.object({
   executionWorkspaceId: z.string().uuid().optional().nullable(),
   executionWorkspacePreference: z.enum(ISSUE_EXECUTION_WORKSPACE_PREFERENCES).optional().nullable(),
   executionWorkspaceSettings: issueExecutionWorkspaceSettingsSchema.optional().nullable(),
+  /** When true, the pipeline dispatches the agent to the case's existing origin issue
+   * instead of creating a new execution issue per stage. Keeps one ticket per component. */
+  useOriginIssue: z.boolean().optional(),
 }).passthrough();
 
 export const pipelineStageAutomationSchema = z.object({

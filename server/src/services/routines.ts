@@ -1621,6 +1621,9 @@ export function routineService(
     executionWorkspaceSettings?: Record<string, unknown> | null;
     descriptionAppendix?: string | null;
     nextRunAtOverride?: Date | null;
+    /** When provided by the pipeline, skip issue creation and wire this
+     * existing issue as the run's linked issue (useOriginIssue mode). */
+    linkedIssueId?: string | null;
     actor?: Actor;
   }) {
     const projectId = input.projectId ?? input.routine.projectId ?? null;
@@ -1750,6 +1753,40 @@ export function routineService(
         : input.trigger?.kind === "schedule" && input.trigger.cronExpression && input.trigger.timezone
           ? nextCronTickInTimeZone(input.trigger.cronExpression, input.trigger.timezone, triggeredAt)
           : undefined;
+
+      // useOriginIssue mode: the pipeline resolved an existing issue to reuse.
+      // Skip creation entirely — wire it directly as the run's linked issue.
+      if (input.linkedIssueId) {
+        const originIssue = await txDb
+          .select({ id: issues.id, assigneeAgentId: issues.assigneeAgentId, status: issues.status })
+          .from(issues)
+          .where(and(eq(issues.id, input.linkedIssueId), eq(issues.companyId, input.routine.companyId)))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+        if (!originIssue) throw notFound("Origin issue for pipeline stage not found");
+        const updated = await finalizeRun(createdRun.id, {
+          status: "issue_created",
+          linkedIssueId: originIssue.id,
+        }, txDb);
+        await updateRoutineTouchedState({
+          routineId: input.routine.id,
+          triggerId: input.trigger?.id ?? null,
+          triggeredAt,
+          status: "issue_created",
+          issueId: originIssue.id,
+          nextRunAt,
+        }, txDb);
+        await queueIssueAssignmentWakeup({
+          heartbeat,
+          issue: originIssue,
+          reason: "issue_assigned",
+          mutation: "update",
+          contextSource: "routine.dispatch",
+          requestedByActorType: input.source === "schedule" ? "system" : undefined,
+          rethrowOnError: false,
+        });
+        return updated ?? createdRun;
+      }
 
       let createdIssue: Awaited<ReturnType<typeof issueSvc.create>> | null = null;
       try {
@@ -2749,7 +2786,11 @@ export function routineService(
       });
     },
 
-    runPipelineStageEntryRoutine: async (id: string, input: RunRoutine & { descriptionAppendix?: string | null }, actor?: Actor) => {
+    runPipelineStageEntryRoutine: async (
+      id: string,
+      input: RunRoutine & { descriptionAppendix?: string | null; linkedIssueId?: string },
+      actor?: Actor,
+    ) => {
       const routine = await getRoutineById(id);
       if (!routine) throw notFound("Routine not found");
       if (routine.status === "archived") throw conflict("Routine is archived");
@@ -2771,6 +2812,7 @@ export function routineService(
         executionWorkspaceSettings:
           (input.executionWorkspaceSettings as Record<string, unknown> | null | undefined) ?? null,
         descriptionAppendix: input.descriptionAppendix ?? null,
+        linkedIssueId: input.linkedIssueId ?? null,
         actor,
       });
     },
