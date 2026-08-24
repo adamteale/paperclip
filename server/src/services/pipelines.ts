@@ -2286,6 +2286,9 @@ async function handleRequireApprovalStageEntry(
   const config = normalizeStageConfig(input.stage.kind, stageConfig(input.stage));
   if (config.requireApproval !== true) return;
 
+  // DEBUG: throw to test if this function is actually called
+  process.stdout.write(`[handleRequireApprovalStageEntry] CALLED for case ${input.caseId} stage ${input.stage.key} caseTitle=${input.caseTitle ?? 'undefined'}\n`);
+
   // Find the automation issue linked to this case
   const automationLink = await resolveLatestCaseIssueLink(tx, {
     companyId: input.companyId,
