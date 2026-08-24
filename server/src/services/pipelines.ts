@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, not, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
 import {
@@ -168,6 +168,9 @@ export type PipelineStageConfig = Record<string, unknown> & {
     executionWorkspaceId?: string | null;
     executionWorkspacePreference?: ExecutionWorkspaceMode | null;
     executionWorkspaceSettings?: IssueExecutionWorkspaceSettings | null;
+    /** When true, reuse the case's existing origin issue instead of spawning a new
+     * execution issue per stage. Prevents multiple tickets appearing per component. */
+    useOriginIssue?: boolean;
   };
 };
 
@@ -3186,6 +3189,35 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
           .returning();
         return { status: "succeeded", execution: reused! };
       }
+
+      // ── useOriginIssue: dispatch to the case's primary imported issue ──
+      // When a stage's onEnter has useOriginIssue: true, skip creating a new
+      // per-stage execution issue. Instead wire the run to the existing
+      // "work" or "origin" linked issue (oldest link, i.e. the Jira mirror).
+      // On subsequent re-entries the "reuse automation issue" block above fires
+      // first and handles it, so this path only runs on first stage entry.
+      let originIssueId: string | undefined;
+      if (stageConfig(detail.stage).onEnter?.useOriginIssue) {
+        const originLink = await db
+          .select({ issueId: pipelineCaseIssueLinks.issueId })
+          .from(pipelineCaseIssueLinks)
+          .where(
+            and(
+              eq(pipelineCaseIssueLinks.caseId, execution.caseId),
+              isNull(pipelineCaseIssueLinks.retiredAt),
+              not(inArray(pipelineCaseIssueLinks.role, ["automation", "conversation"])),
+            ),
+          )
+          .orderBy(asc(pipelineCaseIssueLinks.createdAt))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+        if (!originLink) {
+          throw new Error(
+            `Stage ${detail.stage.key} has useOriginIssue=true but case ${execution.caseId} has no primary issue link (role work/origin)`,
+          );
+        }
+        originIssueId = originLink.issueId;
+      }
       const run = await routinesSvc.runPipelineStageEntryRoutine(execution.routineId, {
         source: "api",
         assigneeAgentId: routine.assigneeAgentId,
@@ -3195,6 +3227,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         executionWorkspaceId: automation.executionWorkspaceId,
         executionWorkspacePreference: automation.executionWorkspacePreference,
         executionWorkspaceSettings: automation.executionWorkspaceSettings,
+        linkedIssueId: originIssueId,
         payload: {
           pipeline: contextPack.pipeline,
           case: contextPack.case,
