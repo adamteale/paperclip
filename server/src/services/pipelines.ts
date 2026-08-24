@@ -2330,7 +2330,7 @@ async function handleRequireApprovalStageEntry(
         targetIssueId = fallback[0].id;
       }
     } catch (e) {
-      process.stdout.write(`[handleRequireApprovalStageEntry] fallback ERROR: ${String(e)}\n`);
+      // best-effort — logged but non-fatal
     }
   }
 
