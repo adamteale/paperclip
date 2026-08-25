@@ -66,6 +66,7 @@ export function queueIssueAssignmentWakeup(input: {
       payload: {
         issueId: input.issue.id,
         mutation: input.mutation,
+        ...(input.wakeCommentId ? { commentId: input.wakeCommentId } : {}),
         ...(input.taskKey ? { taskKey: input.taskKey } : {}),
         ...(input.wakeCommentId ? { wakeCommentId: input.wakeCommentId } : {}),
       },
@@ -77,6 +78,9 @@ export function queueIssueAssignmentWakeup(input: {
       contextSnapshot: {
         issueId: input.issue.id,
         source: input.contextSource,
+        ...(input.wakeCommentId
+          ? { commentId: input.wakeCommentId, wakeCommentId: input.wakeCommentId }
+          : {}),
         ...(input.taskKey ? { taskKey: input.taskKey } : {}),
         ...(input.wakeCommentId ? { wakeCommentId: input.wakeCommentId } : {}),
         ...(input.wakeCommentId && input.attachmentOmissionReasons
