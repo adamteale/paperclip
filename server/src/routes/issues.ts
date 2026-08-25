@@ -11979,14 +11979,24 @@ export function issueRoutes(
 
   router.get("/attachments/:attachmentId/content", async (req, res, next) => {
     const attachmentId = req.params.attachmentId as string;
-    const attachment = await getAccessibleResource(req, res, svc.getAttachmentById(attachmentId), "Attachment not found");
-    if (!attachment) return;
+    // Capability-URL access: the unguessable attachment UUID is itself the
+    // authorization for ANONYMOUS readers — required for embedding screenshots
+    // in GitHub PR descriptions (camo fetches without credentials), OD and
+    // Slack unfurls. Authenticated board users keep full issue-read authz
+    // (company scoping); anonymous access is limited to knowing the UUID.
+    // Patch applied 2026-08-21 after the authenticated-mode flip broke every
+    // Paperclip-hosted image in historical PR descriptions.
+    const attachment = await svc.getAttachmentById(attachmentId);
+    if (!attachment) {
+      res.status(404).json({ error: "Attachment not found" });
+      return;
+    }
     const issue = await svc.getById(attachment.issueId);
     if (!issue) {
       res.status(404).json({ error: "Issue not found" });
       return;
     }
-    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    if (req.actor.type === "board" && !(await assertIssueReadAllowed(req, res, issue))) return;
 
     const contentLength = attachment.byteSize;
     const range = parseAttachmentRangeHeader(
