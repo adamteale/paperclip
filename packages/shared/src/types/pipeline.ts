@@ -10,7 +10,7 @@ export type PipelineCaseConversationSourceReason =
   | "conversation_link"
   | "work_link";
 
-export type PipelineCaseConversationSourceLinkRole = "automation" | "conversation" | "work";
+export type PipelineCaseConversationSourceLinkRole = "automation" | "conversation" | "work" | "origin";
 export type PipelineCaseConversationSourceKind =
   | "explicit_conversation"
   | "own_producer"

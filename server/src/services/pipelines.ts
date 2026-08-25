@@ -405,7 +405,7 @@ async function resolveLatestCaseIssueLink(
     companyId: string;
     caseId: string;
     roles: PipelineCaseConversationSourceLinkRole[];
-    reasonByRole: Record<PipelineCaseConversationSourceLinkRole, PipelineCaseConversationSourceReason>;
+    reasonByRole: Partial<Record<PipelineCaseConversationSourceLinkRole, PipelineCaseConversationSourceReason>>;
   },
 ): Promise<ResolvedPipelineCaseConversationSource | null> {
   const row = await db
@@ -430,7 +430,7 @@ async function resolveLatestCaseIssueLink(
     issue: row.issue,
     kind: role === "conversation" ? "explicit_conversation" : "own_producer",
     isActive: true,
-    reason: input.reasonByRole[role],
+    reason: input.reasonByRole[role] ?? "automation_link",
     linkRole: role,
     sourceRunId: row.link.createdByRunId,
   };
@@ -2302,8 +2302,20 @@ async function handleRequireApprovalStageEntry(
     reasonByRole: { work: "automation_link" },
   });
 
-  // Create interaction on the automation issue (or work issue as fallback)
-  let targetIssueId = automationLink?.issue?.id ?? workLink?.issue?.id ?? null;
+  // Find the origin issue (useOriginIssue pipelines — the work is done on the
+  // origin issue itself, e.g. the no-Designer pipeline). Without this, the
+  // requireApproval interaction is never created for useOriginIssue flows,
+  // leaving the case stuck at the review gate with no Approve/Decline button
+  // and triggering a false "recovery needed" liveness escalation.
+  const originLink = await resolveLatestCaseIssueLink(tx, {
+    companyId: input.companyId,
+    caseId: input.caseId,
+    roles: ["origin"],
+    reasonByRole: { origin: "automation_link" },
+  });
+
+  // Create interaction on the automation issue (or work/origin issue as fallback)
+  let targetIssueId = automationLink?.issue?.id ?? workLink?.issue?.id ?? originLink?.issue?.id ?? null;
 
   // Fallback: if no issue links exist, OR the found issue is done/cancelled
   // (e.g. a feature brief from an earlier stage), find the most recent
