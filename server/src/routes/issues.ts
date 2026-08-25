@@ -9722,7 +9722,26 @@ export function issueRoutes(
         const selfComment = actorIsAgent && actor.actorId === assigneeId;
         const skipAssigneeCommentWake = selfComment || isClosed;
 
-        if (assigneeId && !assigneeChanged && (reopened || !skipAssigneeCommentWake)) {
+        // Resolve @-mentions BEFORE the assignee wake so we can suppress the
+        // generic assignee comment wake when the user explicitly @mentioned a
+        // different agent. Without this, both the assignee and the mentioned
+        // agent get woken simultaneously, and a running assignee claims its
+        // wake before the mentioned agent's heartbeat fires — effectively
+        // defeating @mention routing.
+        let mentionedIds: string[] = [];
+        try {
+          mentionedIds = await svc.findMentionedAgents(issue.companyId, commentBody);
+        } catch (err) {
+          logger.warn({ err, issueId: id }, "failed to resolve @-mentions");
+        }
+
+        // Suppress the assignee's generic comment wake when a non-assignee
+        // agent is @mentioned — the mention wake routes the work instead.
+        const hasNonAssigneeMention = mentionedIds.some(
+          (mid) => mid !== assigneeId && !(actorIsAgent && actor.actorId === mid),
+        );
+
+        if (assigneeId && !assigneeChanged && !hasNonAssigneeMention && (reopened || !skipAssigneeCommentWake)) {
           addWakeup(assigneeId, {
             source: "automation",
             triggerDetail: "system",
@@ -9763,13 +9782,6 @@ export function issueRoutes(
                 : {}),
             },
           });
-        }
-
-        let mentionedIds: string[] = [];
-        try {
-          mentionedIds = await svc.findMentionedAgents(issue.companyId, commentBody);
-        } catch (err) {
-          logger.warn({ err, issueId: id }, "failed to resolve @-mentions");
         }
 
         for (const mentionedId of mentionedIds) {
@@ -11562,7 +11574,22 @@ export function issueRoutes(
       // transition (in_review -> done) suppresses a stale `issue_commented` wake
       // to the returnAssignee for an already-completed issue.
       const skipWake = selfComment || isClosedIssueStatus(currentIssue.status);
-      if (assigneeId && (reopened || !skipWake)) {
+
+      // Resolve @-mentions BEFORE the assignee wake so we can suppress the
+      // generic assignee comment wake when the user explicitly @mentioned a
+      // different agent — the mention wake routes the work instead.
+      let mentionedIds: string[] = [];
+      try {
+        mentionedIds = await svc.findMentionedAgents(issue.companyId, req.body.body);
+      } catch (err) {
+        logger.warn({ err, issueId: id }, "failed to resolve @-mentions");
+      }
+
+      const hasNonAssigneeMention = mentionedIds.some(
+        (mid) => mid !== assigneeId && !(actorIsAgent && actor.actorId === mid),
+      );
+
+      if (assigneeId && !hasNonAssigneeMention && (reopened || !skipWake)) {
         if (reopened) {
           addWakeup(assigneeId, {
             source: "automation",
@@ -11630,13 +11657,6 @@ export function issueRoutes(
             },
           });
         }
-      }
-
-      let mentionedIds: string[] = [];
-      try {
-        mentionedIds = await svc.findMentionedAgents(issue.companyId, req.body.body);
-      } catch (err) {
-        logger.warn({ err, issueId: id }, "failed to resolve @-mentions");
       }
 
       for (const mentionedId of mentionedIds) {
