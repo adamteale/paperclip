@@ -166,6 +166,7 @@ import {
   SVG_CONTENT_TYPE,
 } from "../attachment-types.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
+import { pipelineService } from "../services/pipelines.js";
 import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
   buildIssueBlockersResolvedWakeIdempotencyKey,
@@ -2695,6 +2696,75 @@ export function issueRoutes(
   });
   const enqueueStalledReviewDecisionWakeup = opts.stalledReviewDecisionEnqueueWakeup ?? heartbeat.wakeup;
   const enqueueRecoveryActionWakeup = opts.recoveryActionEnqueueWakeup ?? heartbeat.wakeup;
+  // Own instance of pipelineService (with heartbeat wired) rather than depending on
+  // whatever pipelineRoutes was constructed with — mirrors the existing resilience
+  // pattern in routines.ts (dispatchRoutineRun falls back to its own heartbeatService
+  // rather than trusting shared wiring).
+  const pipelinesForRejectionRouting = pipelineService(db, { heartbeat });
+
+  // A rejected request_confirmation interaction has no pipeline routing by default —
+  // the case just sits still and the rejection only wakes the issue's current
+  // assignee via a generic continuation. Stages can opt in to real routing by setting
+  // `onInteractionRejected: { toStageKey, resetIssueStatus? }` in their config; when
+  // present, rejecting sends the case back to that stage (re-triggering its onEnter
+  // dispatch, which re-owns + wakes that stage's agent), resets the issue off any
+  // stale review-time status, and posts the rejection reason as a comment so the
+  // next agent run reads it. Best-effort: never let a routing failure break the
+  // reject response itself — the interaction is already rejected either way.
+  async function routeRejectedInteractionThroughPipeline(input: {
+    issue: { id: string; companyId: string };
+    interaction: { kind: string; result?: unknown };
+    reason: string | null;
+  }) {
+    if (input.interaction.kind !== "request_confirmation") return;
+    try {
+      const links = await db
+        .select({ caseId: pipelineCaseIssueLinks.caseId })
+        .from(pipelineCaseIssueLinks)
+        .where(and(
+          eq(pipelineCaseIssueLinks.issueId, input.issue.id),
+          inArray(pipelineCaseIssueLinks.role, ["origin", "work"]),
+        ));
+      for (const link of links) {
+        const caseRow = await db
+          .select()
+          .from(pipelineCases)
+          .where(eq(pipelineCases.id, link.caseId))
+          .then((rows) => rows[0] ?? null);
+        if (!caseRow || caseRow.terminalKind) continue;
+        const stageRow = await db
+          .select()
+          .from(pipelineStages)
+          .where(eq(pipelineStages.id, caseRow.stageId))
+          .then((rows) => rows[0] ?? null);
+        const stageConfig = (stageRow?.config ?? {}) as {
+          onInteractionRejected?: { toStageKey?: string; resetIssueStatus?: string };
+        };
+        const onRejected = stageConfig.onInteractionRejected;
+        if (!onRejected?.toStageKey) continue;
+
+        await db.insert(issueComments).values({
+          companyId: input.issue.companyId,
+          issueId: input.issue.id,
+          authorType: "system",
+          body: `## Review rejected\n\n${input.reason?.trim() || "No reason provided."}`,
+        });
+        await svc.update(input.issue.id, {
+          status: onRejected.resetIssueStatus ?? "in_progress",
+        });
+        await pipelinesForRejectionRouting.transitionCase({
+          companyId: input.issue.companyId,
+          caseId: caseRow.id,
+          toStageKey: onRejected.toStageKey,
+          expectedVersion: caseRow.version,
+          actor: { type: "system" },
+          reason: "interaction_rejected",
+        });
+      }
+    } catch (err) {
+      logger.warn({ err, issueId: input.issue.id }, "failed to route rejected interaction through pipeline");
+    }
+  }
   const feedback = feedbackService(db);
   const companiesSvc = companyService(db);
   let searchSvc = opts.searchService ?? null;
@@ -10591,6 +10661,14 @@ export function issueRoutes(
         interaction,
         actor,
         source: "issue.interaction.reject",
+      });
+
+      await routeRejectedInteractionThroughPipeline({
+        issue,
+        interaction,
+        reason: interaction.kind === "request_confirmation" || interaction.kind === "request_checkbox_confirmation"
+          ? ((interaction.result as { reason?: string } | null)?.reason ?? null)
+          : null,
       });
 
       res.json(interaction);
