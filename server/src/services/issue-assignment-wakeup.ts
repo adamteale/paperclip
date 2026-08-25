@@ -43,6 +43,7 @@ export function queueIssueAssignmentWakeup(input: {
   requestedByActorType?: "user" | "agent" | "system";
   requestedByActorId?: string | null;
   taskKey?: string | null;
+  wakeCommentId?: string | null;
   rethrowOnError?: boolean;
 }) {
   if (!input.issue.assigneeAgentId || input.issue.status === "backlog") return;
@@ -55,6 +56,7 @@ export function queueIssueAssignmentWakeup(input: {
       payload: {
         issueId: input.issue.id,
         mutation: input.mutation,
+        ...(input.wakeCommentId ? { commentId: input.wakeCommentId } : {}),
         ...(input.taskKey ? { taskKey: input.taskKey } : {}),
       },
       requestedByActorType: input.requestedByActorType,
@@ -62,6 +64,9 @@ export function queueIssueAssignmentWakeup(input: {
       contextSnapshot: {
         issueId: input.issue.id,
         source: input.contextSource,
+        ...(input.wakeCommentId
+          ? { commentId: input.wakeCommentId, wakeCommentId: input.wakeCommentId }
+          : {}),
         ...(input.taskKey ? { taskKey: input.taskKey } : {}),
       },
     }),

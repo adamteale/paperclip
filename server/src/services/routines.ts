@@ -15,6 +15,7 @@ import {
   folders,
   goals,
   heartbeatRuns,
+  issueComments,
   issueInboxArchives,
   issues,
   pluginManagedResources,
@@ -1785,6 +1786,24 @@ export function routineService(
           originIssue.assigneeAgentId = assigneeAgentId;
           if (needsStatusReset) originIssue.status = "todo";
         }
+        // Deliver the stage brief. In useOriginIssue mode no issue is created,
+        // so `description` (routine text + pipeline preamble/case context) has
+        // no other path into the agent prompt. A system comment reaches both
+        // the wake payload and the task-context markdown. One per dispatch:
+        // the idempotencyKey guard above already returns early on re-entry.
+        let briefCommentId: string | null = null;
+        if (description.trim()) {
+          const [briefComment] = await txDb
+            .insert(issueComments)
+            .values({
+              companyId: input.routine.companyId,
+              issueId: originIssue.id,
+              authorType: "system",
+              body: description,
+            })
+            .returning({ id: issueComments.id });
+          briefCommentId = briefComment?.id ?? null;
+        }
         const updated = await finalizeRun(createdRun.id, {
           status: "issue_created",
           linkedIssueId: originIssue.id,
@@ -1803,6 +1822,7 @@ export function routineService(
           reason: "issue_assigned",
           mutation: "update",
           contextSource: "routine.dispatch",
+          wakeCommentId: briefCommentId,
           requestedByActorType: input.source === "schedule" ? "system" : undefined,
           rethrowOnError: false,
         });
