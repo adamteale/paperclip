@@ -3683,6 +3683,26 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
     }
     if (!wasTerminal && updated.terminalKind === "done") {
       await handleBlockersResolved(tx, input.companyId, current.id);
+      // Case completion IS issue completion: origin/work issues stay
+      // in_progress while moving through the pipeline and only reach done
+      // here, when the case enters a done-kind stage.
+      const completionLinks = await tx
+        .select({ issueId: pipelineCaseIssueLinks.issueId })
+        .from(pipelineCaseIssueLinks)
+        .where(and(
+          eq(pipelineCaseIssueLinks.caseId, current.id),
+          inArray(pipelineCaseIssueLinks.role, ["origin", "work"]),
+        ));
+      if (completionLinks.length > 0) {
+        await tx
+          .update(issues)
+          .set({ status: "done", completedAt: nowDate(), updatedAt: nowDate() })
+          .where(and(
+            eq(issues.companyId, input.companyId),
+            inArray(issues.id, completionLinks.map((l) => l.issueId)),
+            not(inArray(issues.status, ["done", "cancelled"])),
+          ));
+      }
     }
     if (!wasTerminal && isTerminal) {
       await handleChildrenTerminal(tx, input.companyId, current.parentCaseId, input.automationLedgers);
