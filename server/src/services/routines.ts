@@ -1764,6 +1764,27 @@ export function routineService(
           .limit(1)
           .then((rows) => rows[0] ?? null);
         if (!originIssue) throw notFound("Origin issue for pipeline stage not found");
+        // Re-assign the origin issue to the routine's agent (the Coder),
+        // not the previous stage's agent (the Architect). Without this,
+        // the wakeup goes to the previous assignee and the Coder is never
+        // woken. Also reset the status — the heartbeat scheduler won't
+        // pick up done/in_review/blocked/cancelled issues.
+        const needsReassign = originIssue.assigneeAgentId !== assigneeAgentId;
+        const needsStatusReset = originIssue.status === "done" ||
+          originIssue.status === "in_review" ||
+          originIssue.status === "blocked" ||
+          originIssue.status === "cancelled";
+        if (needsReassign || needsStatusReset) {
+          await txDb
+            .update(issues)
+            .set({
+              assigneeAgentId,
+              ...(needsStatusReset ? { status: "todo" as const } : {}),
+            })
+            .where(eq(issues.id, originIssue.id));
+          originIssue.assigneeAgentId = assigneeAgentId;
+          if (needsStatusReset) originIssue.status = "todo";
+        }
         const updated = await finalizeRun(createdRun.id, {
           status: "issue_created",
           linkedIssueId: originIssue.id,
