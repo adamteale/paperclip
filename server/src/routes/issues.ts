@@ -9030,6 +9030,45 @@ export function issueRoutes(
     }
     for (const publication of postCommitActivityPublications) publishActivity(publication);
 
+    // Expire pending interactions when an agent resumes work on an issue
+    // (status transitions to in_progress). This hides stale Approve/Decline
+    // buttons from previous review rounds while the agent is re-working.
+    // The agent will create a fresh interaction when it finishes and needs
+    // approval again.
+    if (updateFields.status === "in_progress" && existing.status !== "in_progress") {
+      const stalePending = await db
+        .select({ id: issueThreadInteractions.id })
+        .from(issueThreadInteractions)
+        .where(and(
+          eq(issueThreadInteractions.companyId, existing.companyId),
+          eq(issueThreadInteractions.issueId, existing.id),
+          eq(issueThreadInteractions.status, "pending"),
+        ));
+      if (stalePending.length > 0) {
+        const now = new Date();
+        await db
+          .update(issueThreadInteractions)
+          .set({
+            status: "expired",
+            resolvedAt: now,
+            updatedAt: now,
+          })
+          .where(and(
+            eq(issueThreadInteractions.companyId, existing.companyId),
+            eq(issueThreadInteractions.issueId, existing.id),
+            eq(issueThreadInteractions.status, "pending"),
+          ));
+        logger.info(
+          {
+            issueId: existing.id,
+            companyId: existing.companyId,
+            expiredCount: stalePending.length,
+          },
+          "Expired pending interactions due to issue transitioning to in_progress",
+        );
+      }
+    }
+
     if (enteringBlocked) {
       const blockedIssue = issue;
       let ownerNotifiedAt: Date | null = null;
