@@ -725,6 +725,17 @@ const MAX_INLINE_WAKE_COMMENTS = 8;
 const MAX_INLINE_WAKE_ATTACHMENTS = 20;
 const MAX_INLINE_WAKE_COMMENT_BODY_CHARS = 4_000;
 const MAX_INLINE_WAKE_COMMENT_BODY_TOTAL_CHARS = 12_000;
+// System-authored comments include routine stage-entry dispatch briefs — the
+// assigned agent's job description. Truncating them at the human-comment
+// budget produced agents that never saw their exit instructions (2026-08-26,
+// DAI: a 21.6k-char QA brief delivered as a 4k comment slice; QA reviewed
+// competently but never transitioned the case). Deliver system comments whole
+// up to a generous ceiling, outside the human/agent comment body budget.
+const MAX_INLINE_WAKE_SYSTEM_COMMENT_BODY_CHARS = 48_000;
+// Routine-dispatch execution issues carry the routine plus the pipeline case
+// appendix as their description; same brief-delivery guarantee for the
+// description slot on adapters that render it inline.
+const MAX_INLINE_WAKE_ROUTINE_ISSUE_DESCRIPTION_CHARS = 48_000;
 const MAX_INLINE_WAKE_ISSUE_DESCRIPTION_CHARS = 12_000;
 const MAX_AGENT_SESSION_MESSAGE_CHARS = 12_000;
 const execFile = promisify(execFileCallback);
@@ -7633,6 +7644,7 @@ export async function buildPaperclipWakePayload(input: {
             status: issues.status,
             priority: issues.priority,
             workMode: issues.workMode,
+            originKind: issues.originKind,
           })
           .from(issues)
           .where(
@@ -7678,66 +7690,7 @@ export async function buildPaperclipWakePayload(input: {
             ),
           );
 
-  const commentsById = new Map(
-    commentRows.map((comment) => [comment.id, comment]),
-  );
-  const issueDescription = conversationMode ? null : issueSummary?.description ?? null;
-  const issueDescriptionTruncated =
-    issueDescription !== null &&
-    issueDescription.length > MAX_INLINE_WAKE_ISSUE_DESCRIPTION_CHARS;
-  const inlineIssueDescription = issueDescriptionTruncated
-    ? issueDescription.slice(0, MAX_INLINE_WAKE_ISSUE_DESCRIPTION_CHARS)
-    : issueDescription;
-  const comments: Array<Record<string, unknown>> = [];
-  let remainingBodyChars = MAX_INLINE_WAKE_COMMENT_BODY_TOTAL_CHARS;
-  let truncated = false;
-  let missingCommentCount = 0;
-  const safeContinuationSummary =
-    continuationSummary && !input.exposeLowTrustRaw
-      ? redactQuarantinedBodyForHigherTrust(continuationSummary)
-      : continuationSummary;
-
-  for (const commentId of commentIds) {
-    const row = commentsById.get(commentId);
-    if (!row) {
-      truncated = true;
-      missingCommentCount += 1;
-      continue;
-    }
-    if (comments.length >= MAX_INLINE_WAKE_COMMENTS) {
-      truncated = true;
-      break;
-    }
-
-    const deletedAt = row.deletedAt ?? null;
-    const safeRow =
-      deletedAt || input.exposeLowTrustRaw
-        ? row
-        : sanitizeQuarantinedCommentForHigherTrust(row);
-    const fullBody = deletedAt ? "" : safeRow.body;
-    const allowedBodyChars = Math.min(
-      MAX_INLINE_WAKE_COMMENT_BODY_CHARS,
-      remainingBodyChars,
-    );
-    if (allowedBodyChars <= 0) {
-      truncated = true;
-      break;
-    }
-
-    const body =
-      fullBody.length > allowedBodyChars
-        ? fullBody.slice(0, allowedBodyChars)
-        : fullBody;
-    const bodyTruncated = body.length < fullBody.length;
-    if (bodyTruncated) truncated = true;
-    remainingBodyChars -= body.length;
-
-    comments.push({
-      id: row.id,
-      issueId: row.issueId,
-      authorType:
-        row.authorType ??
-        (row.authorAgentId ? "agent" : row.authorUserId ? "user" : "system"),
+      authorType,
       body,
       bodyTruncated,
       presentation: deletedAt ? null : (safeRow.presentation ?? null),

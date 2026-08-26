@@ -722,6 +722,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const wakePrompt = renderPaperclipWakePrompt(context.paperclipWake, {
       conversationMode: context.conversationMode === true,
       resumedSession: canResumeSession,
+      // The task-context markdown is the authoritative brief on this lane; keep
+      // the wake prompt's description copy out so the prompt carries it once.
       suppressIssueDescription: taskContextNote.length > 0,
     });
     const shouldUseResumeDeltaPrompt = canResumeSession && wakePrompt.length > 0;
