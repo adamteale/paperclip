@@ -2205,6 +2205,112 @@ describeEmbeddedPostgres("pipelineService", () => {
       });
     });
 
+    it("links the auto-created requireApproval interaction to the PR found in comments, rewritten to the public Gitea origin", async () => {
+      const previousGiteaUrl = process.env.GITEA_URL;
+      const previousGiteaPublicUrl = process.env.GITEA_PUBLIC_URL;
+      process.env.GITEA_URL = "http://192.168.100.92:3002";
+      process.env.GITEA_PUBLIC_URL = "https://robotpants.ddns.net:9443";
+      try {
+        const { company, pipeline } = await seedPipeline();
+        const created = await svc.ingestCase({
+          companyId: company.id,
+          pipelineId: pipeline.id,
+          caseKey: "require-approval-pr-link",
+          title: "Require approval PR link",
+          actor: userActor,
+        });
+        const automationIssue = await seedLinkedIssue({
+          companyId: company.id,
+          caseId: created.case.id,
+          role: "automation",
+          status: "in_progress",
+        });
+        // Simulate create_pr's comment — the internal (LAN-only) Gitea URL.
+        await db.insert(issueComments).values({
+          companyId: company.id,
+          issueId: automationIssue.id,
+          body: "Opened PR: http://192.168.100.92:3002/tsa/widget/pulls/42 — ready for review.",
+        });
+
+        await svc.transitionCase({
+          companyId: company.id,
+          caseId: created.case.id,
+          toStageKey: "review",
+          expectedVersion: created.case.version,
+          actor: userActor,
+        });
+
+        const [interaction] = await db
+          .select()
+          .from(issueThreadInteractions)
+          .where(eq(issueThreadInteractions.issueId, automationIssue.id));
+        expect(interaction).toBeDefined();
+        // Rewritten to the public origin — humans outside the LAN can open it.
+        const publicUrl = "https://robotpants.ddns.net:9443/tsa/widget/pulls/42";
+        expect(interaction!.summary).toContain(publicUrl);
+        expect(interaction!.summary).not.toContain("192.168.100.92");
+        const payload = interaction!.payload as unknown as { prompt: string };
+        expect(payload.prompt).toContain(publicUrl);
+        // CRITICAL: this text must never contain merge-vocabulary — sweepMergedPullRequestConfirmations
+        // auto-accepts request_confirmation interactions whose text is pure
+        // merge-confirmation prose once the referenced PR is merged, and a
+        // requireApproval stage gate must never be auto-accepted that way.
+        expect(interaction!.summary.toLowerCase()).not.toContain("merge");
+        expect(payload.prompt.toLowerCase()).not.toContain("merge");
+      } finally {
+        if (previousGiteaUrl === undefined) delete process.env.GITEA_URL;
+        else process.env.GITEA_URL = previousGiteaUrl;
+        if (previousGiteaPublicUrl === undefined) delete process.env.GITEA_PUBLIC_URL;
+        else process.env.GITEA_PUBLIC_URL = previousGiteaPublicUrl;
+      }
+    });
+
+    it("falls back to a Paperclip issue link when no PR URL is found in comments", async () => {
+      const previousPublicUrl = process.env.PAPERCLIP_PUBLIC_URL;
+      process.env.PAPERCLIP_PUBLIC_URL = "https://paperclip.example.test";
+      try {
+        const { company, pipeline } = await seedPipeline();
+        const created = await svc.ingestCase({
+          companyId: company.id,
+          pipelineId: pipeline.id,
+          caseKey: "require-approval-issue-link",
+          title: "Require approval issue link",
+          actor: userActor,
+        });
+        const automationIssue = await seedLinkedIssue({
+          companyId: company.id,
+          caseId: created.case.id,
+          role: "automation",
+          status: "in_progress",
+        });
+        // seedLinkedIssue inserts raw (bypassing the issue-creation service
+        // that assigns identifiers), so set one explicitly for this test.
+        const identifier = `TSTPRJ-${created.case.id.slice(0, 4)}`;
+        await db.update(issues).set({ identifier }).where(eq(issues.id, automationIssue.id));
+
+        await svc.transitionCase({
+          companyId: company.id,
+          caseId: created.case.id,
+          toStageKey: "review",
+          expectedVersion: created.case.version,
+          actor: userActor,
+        });
+
+        const [interaction] = await db
+          .select()
+          .from(issueThreadInteractions)
+          .where(eq(issueThreadInteractions.issueId, automationIssue.id));
+        expect(interaction).toBeDefined();
+        const expectedLink = `https://paperclip.example.test/TSTPRJ/issues/${identifier}`;
+        expect(interaction!.summary).toContain(expectedLink);
+        const payload = interaction!.payload as unknown as { prompt: string };
+        expect(payload.prompt).toContain(expectedLink);
+      } finally {
+        if (previousPublicUrl === undefined) delete process.env.PAPERCLIP_PUBLIC_URL;
+        else process.env.PAPERCLIP_PUBLIC_URL = previousPublicUrl;
+      }
+    });
+
     it("self-heals stale pending_dispatch automation ledgers on the next sweep", async () => {
       // Simulate a missed dispatch: a ledger created by an in-tx transition
       // but never executed post-commit (the exact bug that stranded DAI-73's
