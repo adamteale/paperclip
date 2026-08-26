@@ -2281,8 +2281,14 @@ async function handleRequireApprovalStageEntry(
     caseId: string;
     stage: typeof pipelineStages.$inferSelect;
     caseTitle?: string;
+    actor: PipelineActor;
   },
 ) {
+  // logActivity expects the full Db type (it needs $client); PipelineDb is
+  // the narrower PgTransaction shape. Same cast used elsewhere in this file
+  // (see appendPipelineAutomationRoutineRevision's txDb) to log activity from
+  // inside a pipeline transaction.
+  const txDb = tx as unknown as Db;
   const config = normalizeStageConfig(input.stage.kind, stageConfig(input.stage));
   if (config.requireApproval !== true) return;
 
@@ -2362,7 +2368,7 @@ async function handleRequireApprovalStageEntry(
 
   // Create the request_confirmation interaction
   const stageName = input.stage.name ?? input.stage.key;
-  await tx.insert(issueThreadInteractions).values({
+  const [interaction] = await tx.insert(issueThreadInteractions).values({
     companyId: input.companyId,
     issueId: targetIssueId,
     kind: "request_confirmation",
@@ -2374,13 +2380,60 @@ async function handleRequireApprovalStageEntry(
       title: `Review: ${stageName}`,
       prompt: `Please review the screenshots and design links in the comments above, then approve the ${stageName} stage to advance the pipeline.`,
     } as any,
+  }).returning();
+
+  // Log the same activity (and, via the plugin event bus, the same
+  // `issue.thread_interaction_created` plugin event) that the manual
+  // creation path (POST /issues/:id/interactions) logs — this raw insert
+  // bypasses issueThreadInteractionService, so without this, plugins (e.g.
+  // the Slack bridge's Approve/Decline notification) never hear about
+  // auto-created requireApproval review gates.
+  await logActivity(txDb, {
+    companyId: input.companyId,
+    ...activityActorPatch(input.actor),
+    action: "issue.thread_interaction_created",
+    entityType: "issue",
+    entityId: targetIssueId,
+    details: {
+      interactionId: interaction.id,
+      interactionKind: interaction.kind,
+      interactionStatus: interaction.status,
+      continuationPolicy: interaction.continuationPolicy,
+      addresseeAgentId: interaction.addresseeAgentId ?? null,
+      requestedResolverPolicy: interaction.requestedResolverPolicy,
+      effectiveResolverPolicy: interaction.effectiveResolverPolicy,
+    },
   });
 
   // Set the mirror/work issue to 'blocked' so it's visible on the Issues board
   if (workLink?.issue?.id && workLink.issue.id !== targetIssueId) {
-    await tx.update(issues)
+    const [blockedIssue] = await tx.update(issues)
       .set({ status: "blocked" })
-      .where(and(eq(issues.id, workLink.issue.id), ne(issues.status, "done")));
+      .where(and(eq(issues.id, workLink.issue.id), ne(issues.status, "done")))
+      .returning();
+
+    // Log the status change too — same reasoning as above: this raw update
+    // bypasses the issues service (the only other place issue.updated is
+    // normally logged), so without this, plugins never hear the mirror
+    // issue went to 'blocked'. Only log when the update actually applied.
+    if (blockedIssue && workLink.issue.status !== "blocked") {
+      await logActivity(txDb, {
+        companyId: input.companyId,
+        ...activityActorPatch(input.actor),
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: blockedIssue.id,
+        details: {
+          identifier: blockedIssue.identifier,
+          status: blockedIssue.status,
+          source: "require_approval_stage_entry",
+          interactionId: interaction.id,
+          _previous: {
+            status: workLink.issue.status,
+          },
+        },
+      });
+    }
 
     // Post a comment on the mirror issue — this gets mirrored to Jira by the
     // bidirectional comment sync, so the team sees the review request in Jira too.
@@ -3672,6 +3725,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       caseId: current.id,
       stage: toStage,
       caseTitle: current.title ?? undefined,
+      actor: input.actor,
     });
     const wasTerminal = isTerminalKind(current.terminalKind);
     const isTerminal = isTerminalKind(updated.terminalKind);

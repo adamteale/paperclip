@@ -2132,6 +2132,79 @@ describeEmbeddedPostgres("pipelineService", () => {
     });
   });
 
+    it("logs plugin-visible activity when auto-creating a requireApproval interaction and blocking the mirror issue", async () => {
+      // Regression test: handleRequireApprovalStageEntry creates the
+      // request_confirmation interaction and blocks the mirror issue via raw
+      // inserts/updates that bypass the normal service/route logActivity
+      // calls. Without an explicit logActivity here, plugins (e.g. the Slack
+      // bridge's Approve/Decline notification) never hear about these
+      // auto-created review gates.
+      const { company, pipeline } = await seedPipeline();
+      const created = await svc.ingestCase({
+        companyId: company.id,
+        pipelineId: pipeline.id,
+        caseKey: "require-approval-activity",
+        title: "Require approval activity",
+        actor: userActor,
+      });
+      const automationIssue = await seedLinkedIssue({
+        companyId: company.id,
+        caseId: created.case.id,
+        role: "automation",
+        status: "in_progress",
+      });
+      const workIssue = await seedLinkedIssue({
+        companyId: company.id,
+        caseId: created.case.id,
+        role: "work",
+        status: "in_progress",
+      });
+
+      await svc.transitionCase({
+        companyId: company.id,
+        caseId: created.case.id,
+        toStageKey: "review",
+        expectedVersion: created.case.version,
+        actor: userActor,
+      });
+
+      const interactions = await db
+        .select()
+        .from(issueThreadInteractions)
+        .where(eq(issueThreadInteractions.issueId, automationIssue.id));
+      expect(interactions).toHaveLength(1);
+      expect(interactions[0]!.status).toBe("pending");
+
+      const interactionActivity = await db
+        .select()
+        .from(activityLog)
+        .where(and(
+          eq(activityLog.entityId, automationIssue.id),
+          eq(activityLog.action, "issue.thread_interaction_created"),
+        ));
+      expect(interactionActivity).toHaveLength(1);
+      expect(interactionActivity[0]!.details).toMatchObject({
+        interactionId: interactions[0]!.id,
+        interactionKind: "request_confirmation",
+        interactionStatus: "pending",
+      });
+
+      const [freshWorkIssue] = await db.select().from(issues).where(eq(issues.id, workIssue.id));
+      expect(freshWorkIssue!.status).toBe("blocked");
+
+      const blockedActivity = await db
+        .select()
+        .from(activityLog)
+        .where(and(eq(activityLog.entityId, workIssue.id), eq(activityLog.action, "issue.updated")));
+      expect(blockedActivity).toHaveLength(1);
+      expect(blockedActivity[0]!.details).toMatchObject({
+        status: "blocked",
+        source: "require_approval_stage_entry",
+        interactionId: interactions[0]!.id,
+        _previous: { status: "in_progress" },
+      });
+    });
+
     it("self-heals stale pending_dispatch automation ledgers on the next sweep", async () => {
       // Simulate a missed dispatch: a ledger created by an in-tx transition
       // but never executed post-commit (the exact bug that stranded DAI-73's
