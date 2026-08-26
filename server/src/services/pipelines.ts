@@ -2458,6 +2458,14 @@ async function handleRequireApprovalStageEntry(
       prompt: reviewLink
         ? `Please review and approve: ${reviewLink}`
         : `Please review the screenshots and design links in the comments above, then approve the ${stageName} stage to advance the pipeline.`,
+      // A human approval gate is never "superseded" by someone commenting on
+      // the thread: expiring it would silently remove the Approve/Decline
+      // buttons and leave the case with no way to be approved. This is already
+      // the effective behaviour (`shouldSupersedeInteractionOnUserComment`
+      // requires an explicit `true`, and this raw insert bypasses the service
+      // default that sets it) — stating it here makes the guarantee explicit
+      // and survives any future change to that default.
+      supersedeOnUserComment: false,
     } as any,
   }).returning();
 
@@ -3860,6 +3868,44 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
   }
 
   /**
+   * When did this case last enter the stage it is sitting in?
+   *
+   * `pipeline_case_events` is the only record of stage entry (there is no
+   * `stage_entered_at` column on `pipeline_cases`, and `issue_thread_
+   * interactions` carries no case/stage link), so the newest
+   * `transitioned`/`transition_forced` event whose `toStageId` is the current
+   * stage IS the stage-entry timestamp. A case that was ingested straight into
+   * its stage has no such event — its own `createdAt` is then the entry time.
+   *
+   * Returns null only when the case row itself cannot be read, in which case
+   * callers must fail closed rather than fall back to "unscoped".
+   */
+  async function currentStageEnteredAt(
+    tx: PipelineDb,
+    input: { companyId: string; caseId: string; stageId?: string },
+  ): Promise<Date | null> {
+    const [caseRow] = await tx
+      .select({ createdAt: pipelineCases.createdAt, stageId: pipelineCases.stageId })
+      .from(pipelineCases)
+      .where(and(eq(pipelineCases.companyId, input.companyId), eq(pipelineCases.id, input.caseId)))
+      .limit(1);
+    if (!caseRow) return null;
+    const stageId = input.stageId ?? caseRow.stageId;
+    const [entry] = await tx
+      .select({ createdAt: pipelineCaseEvents.createdAt })
+      .from(pipelineCaseEvents)
+      .where(and(
+        eq(pipelineCaseEvents.companyId, input.companyId),
+        eq(pipelineCaseEvents.caseId, input.caseId),
+        eq(pipelineCaseEvents.toStageId, stageId),
+        inArray(pipelineCaseEvents.type, ["transitioned", "transition_forced"]),
+      ))
+      .orderBy(desc(pipelineCaseEvents.createdAt))
+      .limit(1);
+    return entry?.createdAt ?? caseRow.createdAt;
+  }
+
+  /**
    * Evaluate an `autoAdvanceOnIssue` gate for one case: true when any linked
    * issue (roles from the rule, links not retired) currently satisfies the
    * declared conditions. Deterministic — pure DB state, no clock, no agent.
@@ -3919,8 +3965,28 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
 
     if (input.rule.interactionAccepted) {
       const issueIds = linked.map((row) => row.issueId);
+      // The accepted interaction must belong to THIS review round. Without the
+      // stage-entry scoping below, any issue that had ever had an accepted
+      // request_confirmation satisfied its next human gate the moment pending
+      // interactions cleared — and pending interactions clear on their own
+      // when a human comments (`superseded_by_comment`). That is exactly how
+      // DAI-180 went `done` at 16:50:31 on 2026-08-26: a reviewer's comment on
+      // the (still open, never merged) PR #65 was mirrored into the issue at
+      // 16:50:19, both pending confirmations were superseded, and two stale
+      // accepted confirmations from 08-21 and 08-25 satisfied `hasAccepted`.
+      // A human comment closed the ticket and orphaned the requested rework.
+      const stageEnteredAt = await currentStageEnteredAt(tx, {
+        companyId: input.companyId,
+        caseId: input.caseId,
+        stageId: input.stage?.id,
+      });
+      // Fail closed: an unknown stage-entry time must never widen the gate.
+      if (!stageEnteredAt) return false;
       const interactions = await tx
-        .select({ status: issueThreadInteractions.status })
+        .select({
+          status: issueThreadInteractions.status,
+          createdAt: issueThreadInteractions.createdAt,
+        })
         .from(issueThreadInteractions)
         .where(
           and(
@@ -3928,7 +3994,14 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
             eq(issueThreadInteractions.kind, "request_confirmation"),
           ),
         );
-      const hasAccepted = interactions.some((row) => row.status === "accepted");
+      // `>=` (not `>`) is required: the stage-entry event and the review-gate
+      // interaction that `handleRequireApprovalStageEntry` creates are written
+      // in the SAME transaction, so both rows carry the identical `now()`.
+      const hasAccepted = interactions.some((row) =>
+        row.status === "accepted" && row.createdAt.getTime() >= stageEnteredAt.getTime()
+      );
+      // `hasPending` stays unscoped on purpose — an older pending card is
+      // still an unanswered question and must keep blocking the gate.
       const hasPending = interactions.some((row) => row.status === "pending");
       if (hasAccepted && !hasPending) return true;
     }

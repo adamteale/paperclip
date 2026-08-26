@@ -38,6 +38,7 @@ import {
 import { routineService } from "../services/routines.ts";
 import { parseIssueGateConfig } from "../services/pipelines.ts";
 import { instanceSettingsService } from "../services/instance-settings.ts";
+import { issueThreadInteractionService } from "../services/issue-thread-interactions.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -2105,6 +2106,167 @@ describeEmbeddedPostgres("pipelineService", () => {
       await seedLinkedIssue({ companyId: company.id, caseId: created.case.id, role: "automation", status: "in_review" });
       const result = await svc.sweepIssueGateCases();
       expect(result.advanced).toBe(0);
+    });
+
+    // Regression tests for the DAI-180 incident (2026-08-26): a human's review
+    // comment on an open PR was mirrored into the issue, which expired the
+    // round's pending confirmations (`superseded_by_comment`). `hasPending`
+    // went false and two accepted confirmations from 08-21 / 08-25 satisfied
+    // `hasAccepted`, so the case at `pr_review` transitioned to `done` with the
+    // PR never merged and the reviewer's feedback never implemented.
+    async function seedReviewGatePipeline(companyId: string) {
+      return svc.createPipeline({
+        companyId,
+        key: `review-gate-${randomUUID().slice(0, 8)}`,
+        name: "Review gate",
+        enforceTransitions: false,
+        actor: userActor,
+        stages: [
+          { key: "intake", name: "Intake", kind: "open" },
+          { key: "review", name: "PR review", kind: "working", config: {
+            autoAdvanceOnIssue: { toStageKey: "done", interactionAccepted: true, roles: ["work"] },
+          } },
+          { key: "done", name: "Done", kind: "done" },
+          { key: "cancelled", name: "Cancelled", kind: "cancelled" },
+        ],
+      });
+    }
+
+    async function seedCaseAtReviewStage(caseKey: string) {
+      const company = await seedCompany();
+      const pipeline = await seedReviewGatePipeline(company.id);
+      const created = await svc.ingestCase({
+        companyId: company.id,
+        pipelineId: pipeline.id,
+        caseKey,
+        title: caseKey,
+        actor: userActor,
+      });
+      const issue = await seedLinkedIssue({
+        companyId: company.id,
+        caseId: created.case.id,
+        role: "work",
+        status: "in_review",
+      });
+      return { company, pipeline, created, issue };
+    }
+
+    async function stageKeyOfCase(caseId: string) {
+      const [row] = await db
+        .select({ key: pipelineStages.key })
+        .from(pipelineCases)
+        .innerJoin(pipelineStages, eq(pipelineStages.id, pipelineCases.stageId))
+        .where(eq(pipelineCases.id, caseId));
+      return row?.key ?? null;
+    }
+
+    it("does not satisfy an interactionAccepted gate with an interaction accepted before the case entered the stage", async () => {
+      const { company, created, issue } = await seedCaseAtReviewStage("stale-accepted-gate");
+
+      // A confirmation accepted days ago, in an earlier stage/review round.
+      await db.insert(issueThreadInteractions).values({
+        companyId: company.id,
+        issueId: issue.id,
+        kind: "request_confirmation",
+        status: "accepted",
+        continuationPolicy: "none",
+        createdAt: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000),
+        payload: { version: 1, prompt: "Approve the plan?" },
+      });
+
+      // Entering the review stage must NOT auto-advance off that stale accept.
+      await svc.transitionCase({
+        companyId: company.id,
+        caseId: created.case.id,
+        toStageKey: "review",
+        expectedVersion: created.case.version,
+        actor: userActor,
+      });
+      expect(await stageKeyOfCase(created.case.id)).toBe("review");
+
+      // Neither may the sweep.
+      expect((await svc.sweepIssueGateCases()).advanced).toBe(0);
+      expect(await stageKeyOfCase(created.case.id)).toBe("review");
+    });
+
+    it("satisfies an interactionAccepted gate with an interaction accepted during the current stage", async () => {
+      const { company, created, issue } = await seedCaseAtReviewStage("current-round-accepted-gate");
+
+      await svc.transitionCase({
+        companyId: company.id,
+        caseId: created.case.id,
+        toStageKey: "review",
+        expectedVersion: created.case.version,
+        actor: userActor,
+      });
+      expect(await stageKeyOfCase(created.case.id)).toBe("review");
+
+      // This round's review card, approved by a human.
+      await db.insert(issueThreadInteractions).values({
+        companyId: company.id,
+        issueId: issue.id,
+        kind: "request_confirmation",
+        status: "accepted",
+        continuationPolicy: "none",
+        payload: { version: 1, prompt: "Approve the PR?" },
+      });
+
+      expect((await svc.sweepIssueGateCases()).advanced).toBe(1);
+      expect(await stageKeyOfCase(created.case.id)).toBe("done");
+    });
+
+    it("does not advance when a human comment supersedes this round's pending confirmation", async () => {
+      const { company, created, issue } = await seedCaseAtReviewStage("comment-supersede-gate");
+
+      // Stale accept from a previous round — the DAI-180 trigger.
+      await db.insert(issueThreadInteractions).values({
+        companyId: company.id,
+        issueId: issue.id,
+        kind: "request_confirmation",
+        status: "accepted",
+        continuationPolicy: "none",
+        createdAt: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000),
+        payload: { version: 1, prompt: "Approve the plan?" },
+      });
+
+      await svc.transitionCase({
+        companyId: company.id,
+        caseId: created.case.id,
+        toStageKey: "review",
+        expectedVersion: created.case.version,
+        actor: userActor,
+      });
+
+      // This round's pending confirmation (agent-created, so the service
+      // default supersedeOnUserComment=true applies).
+      const [pending] = await db.insert(issueThreadInteractions).values({
+        companyId: company.id,
+        issueId: issue.id,
+        kind: "request_confirmation",
+        status: "pending",
+        continuationPolicy: "none",
+        payload: { version: 1, prompt: "Approve the PR?", supersedeOnUserComment: true },
+      }).returning();
+      expect((await svc.sweepIssueGateCases()).advanced).toBe(0);
+
+      // A human comments (the PR review mirrored into the thread) and the
+      // pending card is superseded — exactly what happened on DAI-180.
+      const [comment] = await db.insert(issueComments).values({
+        companyId: company.id,
+        issueId: issue.id,
+        body: "Right CTA is red, must be transparent — use the outline version.",
+        authorUserId: "board-user",
+      }).returning();
+      const expired = await issueThreadInteractionService(db).expireRequestConfirmationsSupersededByComment(
+        { id: issue.id, companyId: company.id },
+        { id: comment!.id, createdAt: comment!.createdAt, authorUserId: "board-user", createdByRunId: null },
+        {},
+      );
+      expect(expired.map((row) => row.id)).toEqual([pending!.id]);
+
+      // Nothing was approved in this round, so the gate must stay shut.
+      expect((await svc.sweepIssueGateCases()).advanced).toBe(0);
+      expect(await stageKeyOfCase(created.case.id)).toBe("review");
     });
 
     it("backfills on stage entry when the issue already satisfies the gate", async () => {

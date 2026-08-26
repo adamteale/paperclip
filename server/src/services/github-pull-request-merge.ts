@@ -1,12 +1,26 @@
 import type { Db } from "@paperclipai/db";
 import { createGitHubExternalObjectProvider } from "./github-external-object-provider.js";
+import {
+  createGiteaPullRequestMergeDetailsResolver,
+  extractGiteaPullRequestReferences,
+  type GiteaEnv,
+  type GiteaPullRequestReference,
+} from "./gitea-pull-request-merge.js";
 
 export type GitHubPullRequestReference = {
+  provider: "github";
   host: "github.com";
   owner: string;
   repo: string;
   number: number;
 };
+
+/**
+ * A PR reference the merge sweep can resolve. GitHub references come from
+ * github.com URLs and `owner/repo#N` shorthand; Gitea references come only
+ * from the origins configured via GITEA_URL / GITEA_PUBLIC_URL.
+ */
+export type PullRequestReference = GitHubPullRequestReference | GiteaPullRequestReference;
 
 export type PullRequestMergeState = "merged" | "open" | "unknown";
 
@@ -18,13 +32,28 @@ export type PullRequestMergeDetails = {
 
 export type PullRequestMergeStateResolver = (
   companyId: string,
-  reference: GitHubPullRequestReference,
+  reference: PullRequestReference,
 ) => Promise<PullRequestMergeState>;
 
 export type PullRequestMergeDetailsResolver = (
   companyId: string,
-  reference: GitHubPullRequestReference,
+  reference: PullRequestReference,
 ) => Promise<PullRequestMergeDetails>;
+
+/**
+ * Stable identity for caches and dedup sets. The provider + host are part of
+ * the key: `admin/tsa-monorepo#12` on Gitea and on GitHub are different PRs.
+ */
+export function pullRequestReferenceKey(reference: PullRequestReference) {
+  return `${reference.provider}:${reference.host.toLowerCase()}`
+    + `/${reference.owner.toLowerCase()}/${reference.repo.toLowerCase()}#${reference.number}`;
+}
+
+/** Human-readable label used in audit details. */
+export function pullRequestReferenceLabel(reference: PullRequestReference) {
+  const slug = `${reference.owner}/${reference.repo}#${reference.number}`;
+  return reference.provider === "github" ? slug : `${reference.host}/${slug}`;
+}
 
 export const PULL_REQUEST_CACHE_MAX_ENTRIES = 1_000;
 
@@ -53,8 +82,8 @@ function addPullRequestReference(
 ) {
   const number = Number(rawNumber);
   if (!Number.isSafeInteger(number) || number <= 0) return;
-  const reference = { host: "github.com", owner, repo, number } as const;
-  const key = `${owner.toLowerCase()}/${repo.toLowerCase()}#${number}`;
+  const reference = { provider: "github", host: "github.com", owner, repo, number } as const;
+  const key = pullRequestReferenceKey(reference);
   if (!references.has(key)) references.set(key, reference);
 }
 
@@ -74,6 +103,21 @@ export function extractGitHubPullRequestReferences(values: readonly unknown[]) {
   return [...references.values()];
 }
 
+/**
+ * Every PR reference this instance can resolve: GitHub (always) plus Gitea
+ * (only for configured origins). Callers that must stay GitHub-only keep
+ * using `extractGitHubPullRequestReferences`.
+ */
+export function extractPullRequestReferences(
+  values: readonly unknown[],
+  env?: GiteaEnv,
+): PullRequestReference[] {
+  return [
+    ...extractGitHubPullRequestReferences(values),
+    ...extractGiteaPullRequestReferences(values, env),
+  ];
+}
+
 function readRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -83,8 +127,10 @@ function readRecord(value: unknown): Record<string, unknown> | null {
 export function createPullRequestMergeDetailsResolver(db: Db): PullRequestMergeDetailsResolver {
   const resolver = createGitHubExternalObjectProvider(db).resolvers
     .find((candidate) => candidate.objectType === "pull_request") ?? null;
+  const resolveGitea = createGiteaPullRequestMergeDetailsResolver(db);
 
   return async (companyId, reference) => {
+    if (reference.provider === "gitea") return resolveGitea(companyId, reference);
     if (!resolver) return { state: "unknown", headRef: null, headSha: null };
     const result = await resolver.resolve({
       companyId,

@@ -870,6 +870,13 @@ export const requestConfirmationToolActionPayloadSchema = z.object({
 
 export const requestConfirmationPayloadSchema = z.object({
   version: z.literal(1),
+  // `prompt` is what makes a confirmation card readable for the common
+  // agent-created shape: `title` and `summary` are both optional, and most
+  // agent-created confirmations set neither (on DAI, 48 of 109 rows), so the
+  // card renders this prompt under a generic "Confirmation requested" heading.
+  // The `.min(1)` here is therefore the constraint guaranteeing every
+  // confirmation carries at least one human-readable field — do not relax it
+  // to optional without giving the reviewer something else to read.
   prompt: z.string().trim().min(1).max(1000),
   acceptLabel: z.string().trim().min(1).max(80).nullable().optional(),
   rejectLabel: z.string().trim().min(1).max(80).nullable().optional(),

@@ -62,14 +62,17 @@ import { evaluateAgentInvokabilityFromDb } from "./agent-invokability.js";
 import { issueService, runWorkspaceIsFinalized } from "./issues.js";
 import {
   createPullRequestMergeStateResolver,
-  extractGitHubPullRequestReferences,
+  extractPullRequestReferences,
+  pullRequestReferenceKey,
+  pullRequestReferenceLabel,
   setBoundedPullRequestCacheEntry,
-  type GitHubPullRequestReference,
   type PullRequestMergeState,
+  type PullRequestReference,
 } from "./github-pull-request-merge.js";
+import { buildGiteaPullRequestUrlPattern } from "./gitea-pull-request-merge.js";
 
-export { extractGitHubPullRequestReferences } from "./github-pull-request-merge.js";
-export type { GitHubPullRequestReference } from "./github-pull-request-merge.js";
+export { extractGitHubPullRequestReferences, extractPullRequestReferences } from "./github-pull-request-merge.js";
+export type { GitHubPullRequestReference, PullRequestReference } from "./github-pull-request-merge.js";
 
 type InteractionActor = {
   agentId?: string | null;
@@ -94,7 +97,7 @@ type InteractionWakeup = (agentId: string, options: {
 export type IssueThreadInteractionServiceOptions = {
   resolvePullRequestState?: (
     companyId: string,
-    reference: GitHubPullRequestReference,
+    reference: PullRequestReference,
   ) => Promise<PullRequestMergeState>;
   wakeup?: InteractionWakeup;
   pullRequestCacheTtlMs?: number;
@@ -154,7 +157,15 @@ function isMergeConfirmationOnlyText(value: string) {
     GITHUB_PULL_REQUEST_SHORTHAND_PATTERN,
     (_match, prefix: string) => `${prefix} pr_reference `,
   );
-  const normalized = withoutReferences
+  // Gitea PR URLs on configured origins are recognised references too, so they
+  // must be neutralised before the vocabulary check — otherwise the host and
+  // port fragments left behind would read as unexpected words and every Gitea
+  // merge confirmation would fail closed.
+  const giteaPattern = buildGiteaPullRequestUrlPattern();
+  const withoutGiteaUrls = giteaPattern
+    ? withoutReferences.replace(giteaPattern, (_match, prefix: string) => `${prefix} pr_reference `)
+    : withoutReferences;
+  const normalized = withoutGiteaUrls
     .replace(/\b(?:github-)?pr-[1-9][0-9]*\b/gi, " pr_reference ")
     .replace(/[`*_\[\]{}()<>:;,.!?"'=+&|\\/-]+/g, " ")
     .trim()
@@ -200,7 +211,7 @@ export function getMergeConfirmationPullRequestReferences(
     return [];
   }
 
-  return extractGitHubPullRequestReferences(trustedTextValues);
+  return extractPullRequestReferences(trustedTextValues);
 }
 
 const ISSUE_THREAD_INTERACTION_IDEMPOTENCY_CONSTRAINT =
@@ -1184,14 +1195,14 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
 
   async function resolvePullRequestState(
     companyId: string,
-    reference: GitHubPullRequestReference,
+    reference: PullRequestReference,
   ): Promise<PullRequestMergeState> {
     if (opts.resolvePullRequestState) return opts.resolvePullRequestState(companyId, reference);
     return defaultPullRequestStateResolver?.(companyId, reference) ?? "unknown";
   }
 
   async function resolvePullRequestStates(
-    entries: Array<{ key: string; companyId: string; reference: GitHubPullRequestReference }>,
+    entries: Array<{ key: string; companyId: string; reference: PullRequestReference }>,
   ) {
     const states = new Map<string, PullRequestMergeState>();
     const pending = entries.slice();
@@ -1512,11 +1523,11 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
       const uniqueReferences = new Map<string, {
         key: string;
         companyId: string;
-        reference: GitHubPullRequestReference;
+        reference: PullRequestReference;
       }>();
       for (const candidate of eligible) {
         for (const reference of candidate.references) {
-          const key = `${candidate.issue.companyId}:${reference.owner.toLowerCase()}/${reference.repo.toLowerCase()}#${reference.number}`;
+          const key = `${candidate.issue.companyId}:${pullRequestReferenceKey(reference)}`;
           const cached = pullRequestStateCache.get(key);
           if (cached && checkedAt - cached.checkedAt < cacheTtlMs) continue;
           uniqueReferences.set(key, { key, companyId: candidate.issue.companyId, reference });
@@ -1532,7 +1543,7 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
       let woken = 0;
       for (const candidate of eligible) {
         const allMerged = candidate.references.every((reference) => {
-          const key = `${candidate.issue.companyId}:${reference.owner.toLowerCase()}/${reference.repo.toLowerCase()}#${reference.number}`;
+          const key = `${candidate.issue.companyId}:${pullRequestReferenceKey(reference)}`;
           return pullRequestStateCache.get(key)?.state === "merged";
         });
         if (!allMerged) continue;
@@ -1547,9 +1558,7 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
               systemId: "system:pr-merged",
               resolutionDetails: {
                 source: "merged_pull_request_sweep",
-                pullRequests: candidate.references.map((reference) =>
-                  `${reference.owner}/${reference.repo}#${reference.number}`
-                ),
+                pullRequests: candidate.references.map(pullRequestReferenceLabel),
               },
             },
           });
