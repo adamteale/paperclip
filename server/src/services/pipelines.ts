@@ -2267,6 +2267,56 @@ async function enqueueStageAutomationLedger(
   return ledger ?? null;
 }
 
+// Generic, provider-agnostic PR-URL matcher used to find the reviewable
+// artefact link that create_pr posts in an issue's comments. Deliberately
+// not reusing extractGitHubPullRequestReferences (github-pull-request-merge.ts):
+// that helper is hardcoded to github.com and returns structured owner/repo/
+// number refs rather than a URL, so it can't match Gitea's `/pulls/<n>` path
+// — which is what create_pr posts on ASUS (self-hosted Gitea). A bare
+// host+path pattern covers GitHub ("/pull/123"), Gitea ("/pulls/123"), and
+// Bitbucket-style URLs alike.
+const REVIEWABLE_PULL_REQUEST_URL_PATTERN = /https?:\/\/[^\s<>"'()]+?\/pulls?\/[1-9][0-9]*\b/i;
+
+/**
+ * Scan an issue's most recent comments (newest first) for a PR URL that
+ * create_pr posted, so the auto-created requireApproval interaction can link
+ * straight to the reviewable artefact instead of leaving the reviewer with
+ * nothing to click.
+ */
+async function findReviewablePullRequestUrl(tx: PipelineDb, companyId: string, issueId: string) {
+  const rows = await tx
+    .select({ body: issueComments.body })
+    .from(issueComments)
+    .where(and(
+      eq(issueComments.companyId, companyId),
+      eq(issueComments.issueId, issueId),
+      isNull(issueComments.deletedAt),
+    ))
+    .orderBy(desc(issueComments.createdAt))
+    .limit(20);
+  for (const row of rows) {
+    const match = REVIEWABLE_PULL_REQUEST_URL_PATTERN.exec(row.body);
+    if (match) return match[0];
+  }
+  return null;
+}
+
+/**
+ * Rewrite an internal Gitea URL to its public origin so humans outside the
+ * LAN can open it — e.g. on ASUS, agents post http://192.168.100.92:3002/...
+ * links (GITEA_URL) that only resolve inside the home network, while
+ * GITEA_PUBLIC_URL (https://robotpants.ddns.net:9443) is the internet-facing
+ * origin. GitHub/Bitbucket URLs never start with GITEA_URL and pass through
+ * untouched.
+ */
+function rewritePullRequestUrlForHumans(url: string) {
+  const trimTrailingSlash = (value: string) => value.replace(/\/+$/, "");
+  const internalOrigin = trimTrailingSlash(process.env.GITEA_URL?.trim() ?? "");
+  const publicOrigin = trimTrailingSlash(process.env.GITEA_PUBLIC_URL?.trim() ?? "");
+  if (!internalOrigin || !publicOrigin || !url.startsWith(internalOrigin)) return url;
+  return `${publicOrigin}${url.slice(internalOrigin.length)}`;
+}
+
 /**
  * When a case enters a requireApproval stage, automatically create a
  * request_confirmation interaction on the linked automation issue + set the
@@ -2366,6 +2416,31 @@ async function handleRequireApprovalStageEntry(
     .limit(1);
   if (existing.length > 0) return;
 
+  // Find the reviewable artefact (typically the PR create_pr posted) so the
+  // interaction links straight to it instead of leaving the reviewer with a
+  // confirmation prompt and nothing to click. Falls back to a link to the
+  // Paperclip issue itself when no PR URL is found in the comments.
+  // NOTE: never introduce the word "merge" into this interaction's title/
+  // summary/payload.prompt/payload.acceptLabel — sweepMergedPullRequestConfirmations
+  // (issue-thread-interactions.ts) auto-accepts request_confirmation
+  // interactions whose text reads as pure merge-confirmation vocabulary once
+  // the referenced PR is merged, and a requireApproval stage gate must never
+  // be auto-accepted by that sweep.
+  const rawPullRequestUrl = await findReviewablePullRequestUrl(tx, input.companyId, targetIssueId);
+  let reviewLink = rawPullRequestUrl ? rewritePullRequestUrlForHumans(rawPullRequestUrl) : null;
+  if (!reviewLink) {
+    const paperclipPublicUrl = process.env.PAPERCLIP_PUBLIC_URL?.trim();
+    const [targetIssueRow] = await tx
+      .select({ identifier: issues.identifier })
+      .from(issues)
+      .where(eq(issues.id, targetIssueId))
+      .limit(1);
+    if (paperclipPublicUrl && targetIssueRow?.identifier) {
+      const projectKey = targetIssueRow.identifier.split("-")[0];
+      reviewLink = `${paperclipPublicUrl.replace(/\/+$/, "")}/${projectKey}/issues/${targetIssueRow.identifier}`;
+    }
+  }
+
   // Create the request_confirmation interaction
   const stageName = input.stage.name ?? input.stage.key;
   const [interaction] = await tx.insert(issueThreadInteractions).values({
@@ -2374,11 +2449,15 @@ async function handleRequireApprovalStageEntry(
     kind: "request_confirmation",
     status: "pending",
     title: `Review: ${stageName}`,
-    summary: `Pipeline case entered ${stageName}. Please review and approve to advance, or decline to send back.`,
+    summary: reviewLink
+      ? `Pipeline case entered ${stageName}. Please review and approve: ${reviewLink}`
+      : `Pipeline case entered ${stageName}. Please review and approve to advance, or decline to send back.`,
     payload: {
       version: 1,
       title: `Review: ${stageName}`,
-      prompt: `Please review the screenshots and design links in the comments above, then approve the ${stageName} stage to advance the pipeline.`,
+      prompt: reviewLink
+        ? `Please review and approve: ${reviewLink}`
+        : `Please review the screenshots and design links in the comments above, then approve the ${stageName} stage to advance the pipeline.`,
     } as any,
   }).returning();
 
