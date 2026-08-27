@@ -12592,6 +12592,38 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         );
     }
 
+    // Provider-outage escalations park issues in `blocked` when continuation retries
+    // exhaust their attempts. When a later continuation retry actually starts running
+    // again, the issue must reflect that work resumed — otherwise it stays falsely
+    // `blocked` while a live run is executing under it (observed: DAI-190, 2026-08-27).
+    // Recovery-origin meta-issues stay blocked by design and are excluded.
+    const claimedRetryReason =
+      readNonEmptyString(parseObject(claimed.contextSnapshot).retryReason) ??
+      claimed.scheduledRetryReason ??
+      null;
+    if (
+      claimedIssueId &&
+      (claimedWakeReason === "issue_continuation_needed" || claimedRetryReason === "issue_continuation_needed")
+    ) {
+      const resumed = await db
+        .update(issues)
+        .set({ status: "in_progress", updatedAt: claimedAt })
+        .where(
+          and(
+            eq(issues.id, claimedIssueId),
+            eq(issues.companyId, claimed.companyId),
+            eq(issues.status, "blocked"),
+            ne(issues.originKind, RECOVERY_ORIGIN_KINDS.strandedIssueRecovery),
+          ),
+        )
+        .returning({ id: issues.id });
+      if (resumed.length > 0) {
+        logger?.info?.(
+          `[continuation-resume] restored issue ${claimedIssueId} to in_progress — continuation retry run ${claimed.id} is live`,
+        );
+      }
+    }
+
     return claimed;
   }
 
