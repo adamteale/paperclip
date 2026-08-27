@@ -53,6 +53,7 @@ import type { IssueAssignmentWakeupDeps } from "./issue-assignment-wakeup.js";
 import { logActivity } from "./activity-log.js";
 import { assertAssignableAgent } from "./agent-assignability.js";
 import { authorizationService } from "./authorization.js";
+import { logger } from "../middleware/logger.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
 import { finalizeSummarySlotsForTerminalIssue } from "./summary-slot-finalization.js";
 import {
@@ -5321,6 +5322,63 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         }
       }
       return { evaluated: candidates.length, advanced, dispatched };
+    },
+
+    /**
+     * Self-heal: close orphaned stage-execution issues. A routine_execution
+     * issue whose pipeline case went terminal (usually cancelled) is left
+     * open by nothing — and lingers as an open child of its mirror. The
+     * recovery system can later weaponise it as a dependency wait (DAI-216,
+     * 2026-08-26: a 6-day-old Brief execution issue parked live work for
+     * hours). Close them so the class cannot recur. Guarded to issues
+     * untouched for 1h so an in-flight stage is never touched.
+     */
+    async cancelOrphanedExecutionIssues(): Promise<{ cancelled: number }> {
+      const orphans = await db
+        .select({ id: issues.id, identifier: issues.identifier, companyId: issues.companyId })
+        .from(issues)
+        .where(
+          and(
+            eq(issues.originKind, "routine_execution"),
+            ne(issues.status, "done"),
+            ne(issues.status, "cancelled"),
+            sql`${issues.updatedAt} < now() - interval '1 hour'`,
+            sql`NOT EXISTS (
+              SELECT 1 FROM pipeline_case_issue_links pcil
+              JOIN pipeline_cases pc ON pc.id = pcil.case_id
+              WHERE pcil.issue_id = ${issues.id}
+                AND pc.retired_at IS NULL
+                AND pc.terminal_kind IS NULL
+            )`,
+          ),
+        )
+        .limit(50);
+      let cancelled = 0;
+      for (const orphan of orphans) {
+        try {
+          const updated = await db
+            .update(issues)
+            .set({ status: "cancelled", updatedAt: new Date() })
+            .where(and(eq(issues.id, orphan.id), eq(issues.companyId, orphan.companyId)))
+            .returning({ id: issues.id })
+            .then((rows) => rows[0] ?? null);
+          if (!updated) continue;
+          await db.insert(issueComments).values({
+            companyId: orphan.companyId,
+            issueId: orphan.id,
+            authorType: "system",
+            body: "Auto-closed: this stage-execution issue's pipeline case is terminal, so this execution is orphaned. It can no longer block or wake any work.",
+          });
+          cancelled += 1;
+          logger.info(
+            { issueId: orphan.id, identifier: orphan.identifier },
+            "orphaned execution issue auto-cancelled"
+          );
+        } catch {
+          // Best-effort per issue.
+        }
+      }
+      return { cancelled };
     },
 
     async transitionCase(input: {

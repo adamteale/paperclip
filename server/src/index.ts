@@ -1003,6 +1003,16 @@ export async function startServer(): Promise<StartedServer> {
         .catch((err) => {
           logger.error({ err }, "pipeline issue-gate sweep failed");
         }));
+      trackHeartbeatSchedulerWork(pipelineGateSweeper
+        .cancelOrphanedExecutionIssues()
+        .then((result) => {
+          if (result.cancelled > 0) {
+            logger.info(result, "orphaned execution issues cancelled");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "orphaned execution issue sweep failed");
+        }));
     };
     const scheduleTerminalWorkspaceSweep = () => {
       if (heartbeatSchedulerStopped) return;

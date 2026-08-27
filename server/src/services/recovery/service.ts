@@ -3246,13 +3246,46 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           notInArray(issues.status, ["done", "cancelled"]),
         ),
       );
-    const blockedByIssueIds = [...new Set([...existingBlockers.map((row) => row.id), ...openChildren.map((row) => row.id)])];
+
+    // Zombie-execution filter: routine stage-execution issues whose pipeline
+    // case is terminal are not real dependencies — they are orphans left open
+    // when a case was cancelled (DAI-216, 2026-08-26: a 6-day-old Brief
+    // execution issue from a cancelled case was converted into a blocker and
+    // parked live work for hours). Exclude them from both children and
+    // pre-existing blocker edges.
+    const candidateIds = [...new Set([...existingBlockers.map((row) => row.id), ...openChildren.map((row) => row.id)])];
+    const zombieExecutionIds = new Set(
+      candidateIds.length > 0
+        ? await db
+          .select({ id: issues.id })
+          .from(issues)
+          .where(
+            and(
+              eq(issues.companyId, issue.companyId),
+              inArray(issues.id, candidateIds),
+              eq(issues.originKind, "routine_execution"),
+              // no live (non-terminal) pipeline case link
+              sql`NOT EXISTS (
+                SELECT 1 FROM pipeline_case_issue_links pcil
+                JOIN pipeline_cases pc ON pc.id = pcil.case_id
+                WHERE pcil.issue_id = ${issues.id}
+                  AND pc.retired_at IS NULL
+                  AND pc.terminal_kind IS NULL
+              )`,
+            ),
+          )
+          .then((rows) => rows.map((row) => row.id))
+        : []
+    );
+    const filteredBlockers = existingBlockers.filter((row) => !zombieExecutionIds.has(row.id));
+    const filteredChildren = openChildren.filter((row) => !zombieExecutionIds.has(row.id));
+    const blockedByIssueIds = [...new Set([...filteredBlockers.map((row) => row.id), ...filteredChildren.map((row) => row.id)])];
     if (blockedByIssueIds.length === 0) return null;
 
     const updated = await issuesSvc.update(issue.id, { status: "blocked", blockedByIssueIds });
     if (!updated) return null;
 
-    const waitingOn = formatIssueLinksForComment([...openChildren, ...existingBlockers]);
+    const waitingOn = formatIssueLinksForComment([...filteredChildren, ...filteredBlockers]);
     await issuesSvc.addComment(
       issue.id,
       `This task is waiting on ${waitingOn} to finish. ` +

@@ -12793,6 +12793,51 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       };
     }
 
+    // Duplicate-run race guard: a same-agent wake lost the queue race and a
+    // sibling run for this issue is already RUNNING (claimed after this run
+    // was queued). Only applies to idempotent status/automation wakes — runs
+    // carrying a comment or resolved-interaction evidence are NEVER dropped,
+    // their content must reach an agent. Observed 2026-08-26 (DAI): comment
+    // wake + stage automation dispatched within 1s both spawned; the loser
+    // burned tokens for 70 minutes on a case that had already advanced.
+    if (
+      issue.executionRunId &&
+      issue.executionRunId !== run.id &&
+      !wakeCommentId &&
+      !hasResolvedInteractionEvidence &&
+      !isInteractionWake
+    ) {
+      const holder = await db
+        .select({
+          id: heartbeatRuns.id,
+          agentId: heartbeatRuns.agentId,
+          status: heartbeatRuns.status,
+          startedAt: heartbeatRuns.startedAt,
+        })
+        .from(heartbeatRuns)
+        .where(and(eq(heartbeatRuns.id, issue.executionRunId), eq(heartbeatRuns.companyId, run.companyId)))
+        .then((rows) => rows[0] ?? null);
+      if (
+        holder &&
+        holder.agentId === run.agentId &&
+        holder.status === "running" &&
+        holder.startedAt &&
+        new Date(holder.startedAt).getTime() >= (run.createdAt?.getTime() ?? 0)
+      ) {
+        return {
+          stale: true,
+          errorCode: "issue_execution_lock_changed",
+          reason:
+            "Cancelled because a newer run for this issue by the same agent is already running; this duplicate wake is superseded",
+          details: {
+            issueId,
+            supersededRunId: run.id,
+            holderRunId: holder.id,
+          },
+        };
+      }
+    }
+
     if (issue.status === "in_review") {
       const currentParticipant = reviewExecutionState?.currentParticipant ?? null;
       if (currentParticipant) {
