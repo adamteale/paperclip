@@ -24,6 +24,7 @@ import {
   eq,
   inArray,
   isNull,
+  like,
   notInArray,
   sql,
 } from "drizzle-orm";
