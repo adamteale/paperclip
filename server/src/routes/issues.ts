@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
 import { z } from "zod";
-import { and, asc, desc, eq, inArray, isNull, notInArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, like, notInArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
@@ -8544,6 +8544,51 @@ export function issueRoutes(
     const effectiveReviewPolicy = req.body.reviewPolicy === undefined
       ? existing.reviewPolicy
       : req.body.reviewPolicy;
+    // Canonical: review-stage verdicts must land on `changes_requested`, never `in_review`.
+    // Agents occasionally finalize a changes-requested verdict with the wrong status,
+    // which silently stalls routing (the executor wake only fires on changes_requested).
+    // Normalize: agent-set in_review + live review-stage case + fresh changes-requested verdict comment.
+    if (req.actor.type === "agent" && updateFields.status === "in_review") {
+      try {
+        const reviewStage = await db
+          .select({ stageKey: pipelineStages.key })
+          .from(pipelineCaseIssueLinks)
+          .innerJoin(pipelineCases, eq(pipelineCases.id, pipelineCaseIssueLinks.caseId))
+          .innerJoin(pipelineStages, eq(pipelineStages.id, pipelineCases.stageId))
+          .where(and(
+            eq(pipelineCaseIssueLinks.issueId, existing.id),
+            like(pipelineStages.key, "%review%"),
+          ))
+          .limit(1);
+        if (reviewStage.length) {
+          const lastComment = await db
+            .select({ body: issueComments.body, createdAt: issueComments.createdAt })
+            .from(issueComments)
+            .where(eq(issueComments.issueId, existing.id))
+            .orderBy(desc(issueComments.createdAt))
+            .limit(1);
+          const c = lastComment[0];
+          if (
+            c
+            && Date.now() - new Date(c.createdAt).getTime() < 15 * 60_000
+            && /changes\s*requested/i.test(c.body ?? "")
+          ) {
+            updateFields.status = "changes_requested";
+            await logActivity(db, {
+              companyId: existing.companyId,
+              actorType: actor.actorType,
+              actorId: actor.actorId,
+              action: "issue.review_verdict_status_normalized",
+              entityType: "issue",
+              entityId: existing.id,
+              details: { from: "in_review", to: "changes_requested", stage: reviewStage[0].stageKey },
+            });
+          }
+        }
+      } catch {
+        // normalization is best-effort; never block the PATCH on it
+      }
+    }
     if (
       existing.status === "in_review"
       && (updateFields.status === "done" || updateFields.status === "cancelled")
