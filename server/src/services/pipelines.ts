@@ -3283,7 +3283,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
 
     const detail = await getCaseWithStageOrThrow(db, execution.companyId, execution.caseId);
     const automation = stageAutomation(detail.stage);
-    if (!automation || automation.id !== execution.automationId) {
+    if (!automation) {
       const [failed] = await db
         .update(pipelineAutomationExecutions)
         .set({ status: "failed", error: "automation_not_configured", updatedAt: nowDate() })
@@ -3297,6 +3297,20 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         payload: { automationId: execution.automationId, error: "automation_not_configured" },
       });
       return { status: "failed", execution: failed! };
+    }
+    if (automation.id !== execution.automationId) {
+      // The autoAdvance cascade can move the case past the stage this execution
+      // was queued for BEFORE the ledger runs (issue_lifecycle fires in the same
+      // second the case enters the stage). That used to fail the automation with
+      // automation_not_configured, silently losing the routine dispatch (TSA:
+      // QA never auto-dispatched; seen 2026-08-28). The correct behavior: the
+      // dispatch survives — re-bind to the CURRENT stage's automation.
+      await db
+        .update(pipelineAutomationExecutions)
+        .set({ automationId: automation.id, routineId: automation.routineId, error: "pending_dispatch", updatedAt: nowDate() })
+        .where(eq(pipelineAutomationExecutions.id, execution.id));
+      execution.automationId = automation.id;
+      execution.routineId = automation.routineId;
     }
 
     try {
