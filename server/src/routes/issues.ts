@@ -131,6 +131,7 @@ import {
   documentAnnotationService,
   logActivity,
   publishActivity,
+  publishPluginDomainEvent,
   projectService,
   routineService,
   workProductService,
@@ -9099,6 +9100,28 @@ export function issueRoutes(
       return;
     }
     for (const publication of postCommitActivityPublications) publishActivity(publication);
+
+    // Publish a plugin domain event on every status transition. Bridges (e.g.
+    // the OpenProject bridge) subscribe to "issue.status_changed" to mirror
+    // statuses outward — the event never existed before, so those handlers
+    // were dead code.
+    if (updateFields.status && existing.status !== issue.status) {
+      publishPluginDomainEvent({
+        eventId: randomUUID(),
+        eventType: "issue.status_changed",
+        occurredAt: new Date().toISOString(),
+        actorId: actor.actorId,
+        actorType: actor.actorType,
+        entityId: issue.id,
+        entityType: "issue",
+        companyId: issue.companyId,
+        payload: {
+          issueId: issue.id,
+          previousStatus: existing.status,
+          newStatus: issue.status,
+        },
+      });
+    }
 
     // Expire pending interactions when an agent resumes work on an issue
     // (status transitions to in_progress). This hides stale Approve/Decline

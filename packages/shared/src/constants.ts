@@ -1641,6 +1641,7 @@ export const PLUGIN_EVENT_TYPES = [
   "budget.incident.resolved",
   "cost_event.created",
   "activity.logged",
+  "issue.status_changed",
 ] as const;
 export type PluginEventType = (typeof PLUGIN_EVENT_TYPES)[number];
 

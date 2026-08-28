@@ -165,6 +165,7 @@ export {
   logActivity,
   persistActivity,
   publishActivity,
+  publishPluginDomainEvent,
   type ActivityPublication,
   type LogActivityInput,
 } from "./activity-log.js";
