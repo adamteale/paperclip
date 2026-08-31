@@ -3411,6 +3411,29 @@ export function accessRoutes(
           (m) => m.get(invite.invitedByUserId!)?.name ?? null
         )
       : null;
+    // Invite-gated sign-up: anyone who loads a valid invite page gets a
+    // short-lived httpOnly cookie holding the invite token. While
+    // PAPERCLIP_AUTH_DISABLE_SIGN_UP is in effect, the better-auth handler
+    // wrapper allows POST /api/auth/sign-up/email only when this cookie maps
+    // to a live invite — so public registration stays closed but invited
+    // people can still create their account from the invite link.
+    const remainingSeconds = Math.max(
+      60,
+      Math.min(
+        Math.floor((invite.expiresAt.getTime() - Date.now()) / 1000),
+        24 * 60 * 60,
+      ),
+    );
+    const requestIsHttps =
+      req.secure ||
+      (Array.isArray(req.headers["x-forwarded-proto"])
+        ? req.headers["x-forwarded-proto"][0]
+        : req.headers["x-forwarded-proto"]) === "https";
+    res.append(
+      "Set-Cookie",
+      `${"pcp_invite_signup"}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${remainingSeconds}` +
+        (requestIsHttps ? "; Secure" : ""),
+    );
     res.json({
       ...toInviteSummaryResponse(req, token, invite, companyBranding),
       invitedByUserName: inviterName,

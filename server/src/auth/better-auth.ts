@@ -1,5 +1,7 @@
 import type { Request, RequestHandler } from "express";
 import type { IncomingHttpHeaders } from "node:http";
+import { createHash } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { betterAuth, type Auth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { toNodeHandler } from "better-auth/node";
@@ -9,6 +11,7 @@ import {
   authSessions,
   authUsers,
   authVerifications,
+  invites,
 } from "@paperclipai/db";
 import type { Config } from "../config.js";
 import { resolvePaperclipInstanceId } from "../home-paths.js";
@@ -178,7 +181,15 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
     emailAndPassword: {
       enabled: true,
       requireEmailVerification: false,
-      disableSignUp: config.authDisableSignUp,
+      // Public sign-up is NOT disabled at the better-auth layer. When
+      // config.authDisableSignUp is true, createBetterAuthHandler enforces the
+      // policy in front of better-auth and carves out exactly one exception:
+      // a sign-up request carrying a valid invite token (set as the
+      // pcp_invite_signup cookie when the invite page is served). Keeping the
+      // plugin flag false lets those invite-gated requests through while the
+      // wrapper rejects everyone else with the same error better-auth would
+      // have produced.
+      disableSignUp: false,
     },
     rateLimit: buildBetterAuthRateLimitOptions({
       deploymentMode: config.deploymentMode,
@@ -195,9 +206,81 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
   return betterAuth(authConfig);
 }
 
-export function createBetterAuthHandler(auth: BetterAuthHandlerTarget): RequestHandler {
+export type InviteSignupGuardOptions = {
+  config: Pick<Config, "authDisableSignUp">;
+  db: Db;
+};
+
+const INVITE_SIGNUP_COOKIE_NAME = "pcp_invite_signup";
+const SIGN_UP_EMAIL_PATH_RE = /^\/api\/auth\/sign-up\/email\/?$/;
+
+function hashInviteToken(token: string) {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function readCookie(req: Request, name: string): string | null {
+  const raw = req.headers.cookie;
+  if (!raw) return null;
+  for (const part of raw.split(";")) {
+    const eqIndex = part.indexOf("=");
+    if (eqIndex === -1) continue;
+    if (part.slice(0, eqIndex).trim() === name) {
+      return part.slice(eqIndex + 1).trim() || null;
+    }
+  }
+  return null;
+}
+
+/**
+ * A raw invite token grants sign-up permission only while the underlying
+ * invite exists, is unrevoked, and is unexpired. (Accepted invites keep
+ * granting — replay/join-request handling in the accept flow governs that.)
+ */
+export async function isValidInviteSignupToken(db: Db, token: string): Promise<boolean> {
+  if (!token.trim()) return false;
+  const invite = await db
+    .select({
+      revokedAt: invites.revokedAt,
+      expiresAt: invites.expiresAt,
+    })
+    .from(invites)
+    .where(eq(invites.tokenHash, hashInviteToken(token)))
+    .then((rows) => rows[0] ?? null);
+  if (!invite) return false;
+  if (invite.revokedAt) return false;
+  if (invite.expiresAt.getTime() <= Date.now()) return false;
+  return true;
+}
+
+export function createBetterAuthHandler(
+  auth: BetterAuthHandlerTarget,
+  guard?: InviteSignupGuardOptions,
+): RequestHandler {
   const handler = toNodeHandler(auth);
   return (req, res, next) => {
+    if (
+      guard &&
+      guard.config.authDisableSignUp &&
+      req.method === "POST" &&
+      SIGN_UP_EMAIL_PATH_RE.test(req.path)
+    ) {
+      const inviteToken = readCookie(req, INVITE_SIGNUP_COOKIE_NAME);
+      void isValidInviteSignupToken(guard.db, inviteToken ?? "")
+        .then((allowed) => {
+          if (allowed) {
+            void Promise.resolve(handler(req, res)).catch(next);
+            return;
+          }
+          // Reproduce better-auth's disabled-sign-up error exactly so clients
+          // and the login UI see the same response they always have.
+          res.status(400).json({
+            code: "EMAIL_PASSWORD_SIGN_UP_DISABLED",
+            message: "Email and password sign up is not enabled",
+          });
+        })
+        .catch(next);
+      return;
+    }
     void Promise.resolve(handler(req, res)).catch(next);
   };
 }
