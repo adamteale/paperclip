@@ -2095,12 +2095,49 @@ async function handleBlockersResolved(db: PipelineDb, companyId: string, blocker
       .limit(1)
       .then((rows) => rows[0] ?? null);
     if (blockedCaseWithStage) {
-      await enqueueStageAutomationLedger(db, {
+      const ledger = await enqueueStageAutomationLedger(db, {
         companyId,
         caseId: blocked.caseId,
         stage: blockedCaseWithStage.stage,
         eventId: event.id,
       });
+      // Fix H (gate-only extension): when the stage has no automation (ledger
+      // is null — e.g. a gate-only triage stage that auto-advances via
+      // autoAdvanceOnIssue), the periodic sweep will eventually fire the gate,
+      // but ONLY if the linked issue's status already matches the gate's
+      // `statuses` condition. If the issue status is stale (e.g. `in_review`
+      // on a case still at triage), the gate never fires. In that case, reset
+      // the issue to the first acceptable status so the sweep can advance it.
+      // Observed on DAI-296 (2026-09-01): issue `in_review` at triage stage
+      // with gate statuses ["todo","in_progress","blocked"] — manually patched
+      // `todo`; this block automates that fix.
+      if (!ledger) {
+        const gateConfig = parseIssueGateConfig(blockedCaseWithStage.stage.config as PipelineStageConfig | null);
+        if (gateConfig?.statuses && gateConfig.statuses.length > 0) {
+          const targetStatus = gateConfig.statuses[0]!;
+          const requiredRoles = gateConfig.roles ?? [...ISSUE_GATE_ROLES];
+          // Find linked issues whose status doesn't satisfy the gate condition.
+          const linkedIssueRows = await db
+            .select({ id: issues.id, status: issues.status })
+            .from(pipelineCaseIssueLinks)
+            .innerJoin(issues, eq(pipelineCaseIssueLinks.issueId, issues.id))
+            .where(and(
+              eq(pipelineCaseIssueLinks.caseId, blocked.caseId),
+              eq(pipelineCaseIssueLinks.companyId, companyId),
+              inArray(pipelineCaseIssueLinks.role, requiredRoles),
+              isNull(pipelineCaseIssueLinks.retiredAt),
+            ));
+          const stalIssues = linkedIssueRows.filter(
+            (row) => !gateConfig.statuses!.includes(row.status as string) && row.status !== "done" && row.status !== "cancelled",
+          );
+          for (const stale of stalIssues) {
+            await db
+              .update(issues)
+              .set({ status: targetStatus, updatedAt: nowDate() })
+              .where(and(eq(issues.id, stale.id), eq(issues.companyId, companyId)));
+          }
+        }
+      }
     }
   }
 }
@@ -4092,14 +4129,22 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       ))
       .limit(1);
     if (already.length > 0) return;
-    await writeCaseEvent(tx, {
-      companyId: input.companyId,
-      caseId: input.caseId,
-      type: "issue_gate_role_mismatch",
-      actor: { type: "system" },
-      fromStageId: input.stage.id,
-      payload: { stageKey: input.stage.key, requiredRoles: input.rule.roles },
-    });
+    // Best-effort: the flag write must never break the surrounding transition.
+    // A missing event-type in the DB CHECK constraint (or any other event-write
+    // failure) previously 500'd every transition into the misconfigured stage.
+    try {
+      await writeCaseEvent(tx, {
+        companyId: input.companyId,
+        caseId: input.caseId,
+        type: "issue_gate_role_mismatch",
+        actor: { type: "system" },
+        fromStageId: input.stage.id,
+        payload: { stageKey: input.stage.key, requiredRoles: input.rule.roles },
+      });
+    } catch (err) {
+      console.error(`[pipelines] issue_gate_role_mismatch event write failed (best-effort): ${String(err).slice(0, 200)}`);
+      return;
+    }
     await postSystemCommentOnLinkedIssues(tx, {
       companyId: input.companyId,
       caseId: input.caseId,
