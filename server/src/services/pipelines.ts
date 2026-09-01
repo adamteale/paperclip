@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { rewriteInternalGitUrlsForHumans } from "./internal-git-url-rewrite.js";
 import { isDeepStrictEqual } from "node:util";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, not, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
@@ -2311,11 +2312,9 @@ async function findReviewablePullRequestUrl(tx: PipelineDb, companyId: string, i
  * untouched.
  */
 function rewritePullRequestUrlForHumans(url: string) {
-  const trimTrailingSlash = (value: string) => value.replace(/\/+$/, "");
-  const internalOrigin = trimTrailingSlash(process.env.GITEA_URL?.trim() ?? "");
-  const publicOrigin = trimTrailingSlash(process.env.GITEA_PUBLIC_URL?.trim() ?? "");
-  if (!internalOrigin || !publicOrigin || !url.startsWith(internalOrigin)) return url;
-  return `${publicOrigin}${url.slice(internalOrigin.length)}`;
+  // Delegates to the shared helper (scheme-agnostic host:port match) so an
+  // agent-posted https://192.168.100.92:3002 link is rewritten too.
+  return rewriteInternalGitUrlsForHumans(url);
 }
 
 /**

@@ -135,6 +135,7 @@ import {
 } from "./issue-execution-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
+import { rewriteInternalGitUrlsForHumans } from "./internal-git-url-rewrite.js";
 import { redactSensitiveText } from "../redaction.js";
 import {
   resolveIssueGoalId,
@@ -12035,6 +12036,12 @@ export function issueService(db: Db) {
       if (issue.conversationAgentId && actor.userId && !(await instanceSettingsService(dbOrTx).getExperimental()).enableAgentChat) {
         throw unprocessable("Agent Chat is disabled in Experimental settings");
       }
+
+      // Agents post internal Gitea links (sometimes with an improvised https
+      // scheme) that are LAN-only and SSL-error in browsers — rewrite them to
+      // GITEA_PUBLIC_URL before anything persists.
+      body = rewriteInternalGitUrlsForHumans(body);
+
       const currentUserRedactionOptions = {
         // Keep every read on the caller's transaction connection. Re-entering
         // the outer pool here can deadlock when concurrent transactions fill
