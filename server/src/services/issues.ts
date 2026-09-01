@@ -89,6 +89,7 @@ import { mergeExecutionWorkspaceConfig } from "./execution-workspaces.js";
 import { buildInitialIssueMonitorFields, normalizeIssueExecutionPolicy } from "./issue-execution-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { redactCurrentUserText } from "../log-redaction.js";
+import { rewriteInternalGitUrlsForHumans } from "./internal-git-url-rewrite.js";
 import { redactSensitiveText } from "../redaction.js";
 import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallback.js";
 import { getRunLogStore } from "./run-log-store.js";
@@ -8625,6 +8626,11 @@ export function issueService(db: Db) {
         .then((rows: Array<{ companyId: string }>) => rows[0] ?? null);
 
       if (!issue) throw notFound("Issue not found");
+
+      // Agents post internal Gitea links (sometimes with an improvised https
+      // scheme) that are LAN-only and SSL-error in browsers — rewrite them to
+      // GITEA_PUBLIC_URL before anything persists.
+      body = rewriteInternalGitUrlsForHumans(body);
 
       const currentUserRedactionOptions = {
         enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
