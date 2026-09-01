@@ -2059,7 +2059,7 @@ async function handleBlockersResolved(db: PipelineDb, companyId: string, blocker
         or(isNull(pipelineCases.terminalKind), ne(pipelineCases.terminalKind, "done")),
       ));
     if ((count ?? 0) > 0 || await hasBlockersResolvedForLatestBlockerSet(db, blocked.caseId)) continue;
-    await writeCaseEvent(db, {
+    const event = await writeCaseEvent(db, {
       companyId,
       caseId: blocked.caseId,
       type: "blockers_resolved",
@@ -2072,6 +2072,36 @@ async function handleBlockersResolved(db: PipelineDb, companyId: string, blocker
       roles: ["work"],
       body: `Pipeline blockers resolved for case ${blocked.caseId}. The case can be retried now that blocker ${blockerCaseId} is done.`,
     });
+    // Fix H: re-dispatch the stage automation so the assigned agent resumes
+    // work automatically. Without this, the comment above was the only signal
+    // and the case sat idle until a human manually intervened (observed on
+    // DAI-293 / DAI-296, 2026-09-01: blocker resolved 13:57, no movement for
+    // hours because the periodic autoAdvanceOnIssue sweep alone is not enough
+    // when the issue status doesn't match the gate condition at that moment).
+    // The pending_dispatch self-heal sweep (sweepPipelineAutomation) picks up
+    // the enqueued ledger and executes it, so no immediate executeAutomationLedger
+    // call is needed here — and this function is called inside db.transaction()
+    // where the caller's post-commit executeAutomationLedgers handles any
+    // collected ledgers automatically.
+    const blockedCaseWithStage = await db
+      .select({ stage: pipelineStages })
+      .from(pipelineCases)
+      .innerJoin(pipelineStages, eq(pipelineCases.stageId, pipelineStages.id))
+      .where(and(
+        eq(pipelineCases.id, blocked.caseId),
+        eq(pipelineCases.companyId, companyId),
+        isNull(pipelineCases.terminalKind),
+      ))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (blockedCaseWithStage) {
+      await enqueueStageAutomationLedger(db, {
+        companyId,
+        caseId: blocked.caseId,
+        stage: blockedCaseWithStage.stage,
+        eventId: event.id,
+      });
+    }
   }
 }
 
