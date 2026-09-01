@@ -3456,7 +3456,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
   async function issueGateSatisfiedForCase(
     tx: PipelineDb,
     input: { companyId: string; caseId: string; rule: PipelineIssueGateConfig },
-  ): Promise<boolean> {
+  ): Promise<{ satisfied: boolean; linkedCount: number }> {
     const linked = await tx
       .select({ issueId: pipelineCaseIssueLinks.issueId, status: issues.status })
       .from(pipelineCaseIssueLinks)
@@ -3469,10 +3469,19 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
           inArray(pipelineCaseIssueLinks.role, input.rule.roles),
         ),
       );
-    if (linked.length === 0) return false;
+    // `linked.length === 0` is not "not yet satisfied" — it means no issue on
+    // this case carries any of the rule's required roles at all, which no
+    // future status change can fix. Distinguished from a normal not-yet-true
+    // gate so the caller can flag it (see `flagIssueGateRoleMismatch`) instead
+    // of the sweep silently re-evaluating a structurally-unsatisfiable gate
+    // forever — a config where `roles` doesn't match how this pipeline's
+    // cases actually link their issues parks the case at this stage with zero
+    // automation executions and no signal anywhere that a role mismatch, not
+    // a pending status, is the cause.
+    if (linked.length === 0) return { satisfied: false, linkedCount: 0 };
 
     if (input.rule.statuses && linked.some((row) => input.rule.statuses!.includes(row.status))) {
-      return true;
+      return { satisfied: true, linkedCount: linked.length };
     }
 
     if (input.rule.interactionAccepted) {
@@ -3488,10 +3497,58 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         );
       const hasAccepted = interactions.some((row) => row.status === "accepted");
       const hasPending = interactions.some((row) => row.status === "pending");
-      if (hasAccepted && !hasPending) return true;
+      if (hasAccepted && !hasPending) return { satisfied: true, linkedCount: linked.length };
     }
 
-    return false;
+    return { satisfied: false, linkedCount: linked.length };
+  }
+
+  /**
+   * One-time loud flag for a structurally-unsatisfiable `autoAdvanceOnIssue`
+   * gate (zero linked issues carry any of the rule's required roles). Posted
+   * once per case+stage (guarded by a prior `issue_gate_role_mismatch` case
+   * event) so the periodic sweep's repeated re-evaluation doesn't spam it.
+   * A case parked forever with no operator visibility is worse than a noisy
+   * one-off notice.
+   */
+  async function flagIssueGateRoleMismatch(
+    tx: PipelineDb,
+    input: {
+      companyId: string;
+      caseId: string;
+      stage: typeof pipelineStages.$inferSelect;
+      rule: PipelineIssueGateConfig;
+    },
+  ) {
+    const already = await tx
+      .select({ id: pipelineCaseEvents.id })
+      .from(pipelineCaseEvents)
+      .where(and(
+        eq(pipelineCaseEvents.companyId, input.companyId),
+        eq(pipelineCaseEvents.caseId, input.caseId),
+        eq(pipelineCaseEvents.type, "issue_gate_role_mismatch"),
+        eq(pipelineCaseEvents.fromStageId, input.stage.id),
+      ))
+      .limit(1);
+    if (already.length > 0) return;
+    await writeCaseEvent(tx, {
+      companyId: input.companyId,
+      caseId: input.caseId,
+      type: "issue_gate_role_mismatch",
+      actor: { type: "system" },
+      fromStageId: input.stage.id,
+      payload: { stageKey: input.stage.key, requiredRoles: input.rule.roles },
+    });
+    await postSystemCommentOnLinkedIssues(tx, {
+      companyId: input.companyId,
+      caseId: input.caseId,
+      roles: [...ISSUE_GATE_ROLES],
+      body: `⚠️ **Pipeline gate misconfiguration** — stage \`${input.stage.key}\`'s \`autoAdvanceOnIssue\` gate ` +
+        `requires a linked issue with role(s) \`${input.rule.roles.join(", ")}\`, but no non-retired issue link ` +
+        `on this case has that role. This case cannot advance past \`${input.stage.key}\` automatically and will ` +
+        `sit here indefinitely until an operator either relinks the correct role or fixes the stage config. ` +
+        `(Detected by the periodic gate sweep — this notice is posted once per stage.)`,
+    });
   }
 
   /**
@@ -3515,12 +3572,22 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
     if (!rule) return;
     const visited = input.visitedStageIds ?? new Set<string>();
     if (visited.has(input.stage.id)) return;
-    const satisfied = await issueGateSatisfiedForCase(tx, {
+    const result = await issueGateSatisfiedForCase(tx, {
       companyId: input.companyId,
       caseId: input.caseRow.id,
       rule,
     });
-    if (!satisfied) return;
+    if (!result.satisfied) {
+      if (result.linkedCount === 0) {
+        await flagIssueGateRoleMismatch(tx, {
+          companyId: input.companyId,
+          caseId: input.caseRow.id,
+          stage: input.stage,
+          rule,
+        });
+      }
+      return;
+    }
     const toStage = await getStageByKeyOrThrow(tx, input.caseRow.pipelineId, rule.toStageKey);
     if (toStage.id === input.stage.id) return;
     visited.add(input.stage.id);
