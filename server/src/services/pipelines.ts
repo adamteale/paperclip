@@ -3932,7 +3932,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       rule: PipelineIssueGateConfig;
       stage?: typeof pipelineStages.$inferSelect;
     },
-  ): Promise<boolean> {
+  ): Promise<{ satisfied: boolean; linkedCount: number }> {
     // When the stage is known, restrict to automation issues whose execution
     // belongs to THIS stage's onEnter automation — prevents gate cascade where
     // a done automation issue from a previous stage satisfies gates on every
@@ -3971,10 +3971,20 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
               : []),
         ),
       );
-    if (linked.length === 0) return false;
+    // `linked.length === 0` is not "not yet satisfied" — it means NO issue on
+    // this case carries any of the rule's required roles at all, which no
+    // future status change can fix. Distinguished from a normal not-yet-true
+    // gate so the caller can flag it (see `flagIssueGateRoleMismatch`) instead
+    // of the sweep silently re-evaluating a structurally-unsatisfiable gate
+    // forever (DAI-293, 2026-09-01: case parked at `triage` from creation to
+    // at least the next evening, 0 automation executions ever, because the
+    // stage's gate required role `origin` while the case's only link was
+    // `work` — the sweep ran and returned false every single time with no
+    // signal anywhere that the mismatch, not a pending status, was the cause).
+    if (linked.length === 0) return { satisfied: false, linkedCount: 0 };
 
     if (input.rule.statuses && linked.some((row) => input.rule.statuses!.includes(row.status))) {
-      return true;
+      return { satisfied: true, linkedCount: linked.length };
     }
 
     if (input.rule.interactionAccepted) {
@@ -3995,7 +4005,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         stageId: input.stage?.id,
       });
       // Fail closed: an unknown stage-entry time must never widen the gate.
-      if (!stageEnteredAt) return false;
+      if (!stageEnteredAt) return { satisfied: false, linkedCount: linked.length };
       const interactions = await tx
         .select({
           status: issueThreadInteractions.status,
@@ -4017,10 +4027,59 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       // `hasPending` stays unscoped on purpose — an older pending card is
       // still an unanswered question and must keep blocking the gate.
       const hasPending = interactions.some((row) => row.status === "pending");
-      if (hasAccepted && !hasPending) return true;
+      if (hasAccepted && !hasPending) return { satisfied: true, linkedCount: linked.length };
     }
 
-    return false;
+    return { satisfied: false, linkedCount: linked.length };
+  }
+
+  /**
+   * One-time loud flag for a structurally-unsatisfiable `autoAdvanceOnIssue`
+   * gate (zero linked issues carry any of the rule's required roles). Posted
+   * once per case+stage (guarded by a prior `issue_gate_role_mismatch` case
+   * event) so the periodic sweep's repeated re-evaluation doesn't spam it.
+   * Mirrors the "never silent blindness" posture used for Figma-ontology
+   * drift elsewhere in this codebase — a case parked forever with no operator
+   * visibility is worse than a noisy one-off notice.
+   */
+  async function flagIssueGateRoleMismatch(
+    tx: PipelineDb,
+    input: {
+      companyId: string;
+      caseId: string;
+      stage: typeof pipelineStages.$inferSelect;
+      rule: PipelineIssueGateConfig;
+    },
+  ) {
+    const already = await tx
+      .select({ id: pipelineCaseEvents.id })
+      .from(pipelineCaseEvents)
+      .where(and(
+        eq(pipelineCaseEvents.companyId, input.companyId),
+        eq(pipelineCaseEvents.caseId, input.caseId),
+        eq(pipelineCaseEvents.type, "issue_gate_role_mismatch"),
+        eq(pipelineCaseEvents.fromStageId, input.stage.id),
+      ))
+      .limit(1);
+    if (already.length > 0) return;
+    await writeCaseEvent(tx, {
+      companyId: input.companyId,
+      caseId: input.caseId,
+      type: "issue_gate_role_mismatch",
+      actor: { type: "system" },
+      fromStageId: input.stage.id,
+      payload: { stageKey: input.stage.key, requiredRoles: input.rule.roles },
+    });
+    await postSystemCommentOnLinkedIssues(tx, {
+      companyId: input.companyId,
+      caseId: input.caseId,
+      roles: [...ISSUE_GATE_ROLES],
+      body: `⚠️ **Pipeline gate misconfiguration** — stage \`${input.stage.key}\`'s \`autoAdvanceOnIssue\` gate ` +
+        `requires a linked issue with role(s) \`${input.rule.roles.join(", ")}\`, but no non-retired issue link ` +
+        `on this case has that role. This case cannot advance past \`${input.stage.key}\` automatically and will ` +
+        `sit here indefinitely until an operator either relinks the correct role or fixes the stage config. ` +
+        `(Detected by the periodic gate sweep — this notice is posted once per stage.)`,
+    });
   }
 
   /**
@@ -4044,13 +4103,23 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
     if (!rule) return;
     const visited = input.visitedStageIds ?? new Set<string>();
     if (visited.has(input.stage.id)) return;
-    const satisfied = await issueGateSatisfiedForCase(tx, {
+    const result = await issueGateSatisfiedForCase(tx, {
       companyId: input.companyId,
       caseId: input.caseRow.id,
       rule,
       stage: input.stage,
     });
-    if (!satisfied) return;
+    if (!result.satisfied) {
+      if (result.linkedCount === 0) {
+        await flagIssueGateRoleMismatch(tx, {
+          companyId: input.companyId,
+          caseId: input.caseRow.id,
+          stage: input.stage,
+          rule,
+        });
+      }
+      return;
+    }
     const toStage = await getStageByKeyOrThrow(tx, input.caseRow.pipelineId, rule.toStageKey);
     if (toStage.id === input.stage.id) return;
     visited.add(input.stage.id);
