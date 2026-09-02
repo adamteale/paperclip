@@ -1485,6 +1485,13 @@
       "when": 1788289447587,
       "tag": "0213_gate_role_mismatch_event_type",
       "breakpoints": true
+    },
+    {
+      "idx": 214,
+      "version": "7",
+      "when": 1788289507587,
+      "tag": "0214_heartbeat_context_snapshot_indexes",
+      "breakpoints": true
     }
   ]
 }
