@@ -3877,6 +3877,33 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         },
       });
     }
+    // On leaving a run_routine stage, clear the agent assignment from linked work/origin
+    // issues. The stage's onEnter automation sets the agent as assignee (via useOriginIssue
+    // or explicit assignment); if not cleared, any future status PATCH to those issues
+    // re-triggers that agent even after the case has moved on — e.g. the Architect
+    // re-queuing at implement/qa_review/pr_review.
+    // See: gotchas.md "Patching issue status dispatches the assigned agent regardless of case stage"
+    if (stageConfig(fromStage).onEnter?.type === "run_routine") {
+      const exitedLinks = await tx
+        .select({ issueId: pipelineCaseIssueLinks.issueId })
+        .from(pipelineCaseIssueLinks)
+        .where(and(
+          eq(pipelineCaseIssueLinks.caseId, current.id),
+          inArray(pipelineCaseIssueLinks.role, ["work", "origin"]),
+          isNull(pipelineCaseIssueLinks.retiredAt),
+        ));
+      if (exitedLinks.length > 0) {
+        await tx
+          .update(issues)
+          .set({ assigneeAgentId: null, updatedAt: nowDate() })
+          .where(and(
+            eq(issues.companyId, input.companyId),
+            inArray(issues.id, exitedLinks.map((l) => l.issueId)),
+            isNotNull(issues.assigneeAgentId),
+          ));
+      }
+    }
+
     const ledger = await enqueueStageAutomationLedger(tx, {
       companyId: input.companyId,
       caseId: current.id,
