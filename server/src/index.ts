@@ -1323,27 +1323,35 @@ export async function startServer(): Promise<StartedServer> {
                 logger.warn({ ...reconciled }, "periodic task-watchdog reconciliation triggered watchdog work");
               }
             })
-            .then(async () => {
-              const scanned = await heartbeat.scanSilentActiveRuns();
-              if (scanned.created > 0 || scanned.escalated > 0) {
-                logger.warn({ ...scanned }, "periodic active-run output watchdog created review work");
-              }
-            })
-            .then(async () => {
-              const swept = await heartbeat.sweepStaleIssueLocks();
-              if (swept.cleared > 0) {
-                logger.warn({ ...swept }, "periodic stale-lock sweeper cleared issue locks");
-              }
-            })
-            .then(async () => {
-              const reviewed = await heartbeat.reconcileProductivityReviews();
-              if (reviewed.created > 0 || reviewed.updated > 0 || reviewed.failed > 0) {
-                logger.warn({ ...reviewed }, "periodic productivity reconciliation created or updated review work");
-              }
-            })
             .catch((err) => {
               logger.error({ err }, "periodic heartbeat recovery failed");
             }));
+
+          // The output-silence watchdog, stale-lock sweeper, and productivity
+          // reconciler run as an INDEPENDENT tracked promise, not chained behind
+          // the reconciliation steps above. A slow or hung reconciler upstream
+          // must never starve the watchdog: a run that stops emitting output
+          // while its process stays alive (e.g. a hung provider stream) is only
+          // caught by scanSilentActiveRuns, and chaining it behind heavier
+          // steps let a single stuck reconciliation silently disable alerting
+          // for hours (observed 2026-09-03: 4h-silent run, zero alerts, zero
+          // errors logged because the chain simply never reached the scan).
+          trackHeartbeatSchedulerWork((async () => {
+            const scanned = await heartbeat.scanSilentActiveRuns();
+            if (scanned.created > 0 || scanned.escalated > 0) {
+              logger.warn({ ...scanned }, "periodic active-run output watchdog created review work");
+            }
+            const swept = await heartbeat.sweepStaleIssueLocks();
+            if (swept.cleared > 0) {
+              logger.warn({ ...swept }, "periodic stale-lock sweeper cleared issue locks");
+            }
+            const reviewed = await heartbeat.reconcileProductivityReviews();
+            if (reviewed.created > 0 || reviewed.updated > 0 || reviewed.failed > 0) {
+              logger.warn({ ...reviewed }, "periodic productivity reconciliation created or updated review work");
+            }
+          })().catch((err) => {
+            logger.error({ err }, "periodic run-output watchdog sweep failed");
+          }));
         }
       })().catch((err) => {
         logger.error({ err }, "heartbeat scheduler tick failed");

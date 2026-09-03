@@ -157,6 +157,14 @@ const NON_HUMAN_SENTINEL_AUTHOR_USER_IDS = new Set<string>(["local-board"]);
 const ISSUE_COMMENT_RUN_LOG_DERIVATION_MAX_LOG_BYTES = 2_000_000;
 const ISSUE_COMMENT_RUN_LOG_DERIVATION_CHUNK_BYTES = 256_000;
 const ISSUE_COMMENT_RUN_LOG_DERIVATION_END_SLACK_MS = 60_000;
+// Run logs are purged by the disk-hygiene job after ~1 day. Runs that finished
+// older than this cannot have a readable log, so the derivation tier that
+// reads log bodies must not attempt the read. Before this guard, every
+// comment-listing pass re-attempted (and 404-warned) reads for every purged
+// log forever, because a missing log can never produce a persistable
+// attribution to short-circuit future passes (observed as a continuous
+// ~1/s warn storm on 2026-09-03).
+const ISSUE_COMMENT_RUN_LOG_DERIVATION_STALE_RUN_CUTOFF_MS = 2 * 24 * 60 * 60 * 1000;
 const ISSUE_COMMENT_RUN_LOG_DERIVATION_MAX_PARALLEL_READS = 8;
 export const ISSUE_CREATE_IDEMPOTENCY_KEY_RETENTION_DAYS = 7;
 const ISSUE_CREATE_IDEMPOTENCY_KEY_RETENTION_MS = ISSUE_CREATE_IDEMPOTENCY_KEY_RETENTION_DAYS * 24 * 60 * 60 * 1000;
@@ -4687,10 +4695,17 @@ export function issueService(db: Db) {
     const unresolved = candidates.filter((comment) => !derivedByCommentId.has(comment.id));
     if (unresolved.length > 0) {
       const runIdsToRead = new Set<string>();
+      const staleRunCutoffMs = Date.now() - ISSUE_COMMENT_RUN_LOG_DERIVATION_STALE_RUN_CUTOFF_MS;
       for (const run of runs) {
         const runStartMs = toTimestampMs(run.startedAt ?? run.createdAt);
         const runEndMs = toTimestampMs(run.finishedAt ?? run.createdAt);
         if (runStartMs === null || runEndMs === null) continue;
+        // Skip log reads for runs whose logs are certainly purged: finished
+        // long ago. Still-running runs keep their logs live, so they are never
+        // skipped. Keeps unresolvable comments from generating a 404 read
+        // attempt on every single pass.
+        const finishedAtMs = toTimestampMs(run.finishedAt);
+        if (finishedAtMs !== null && finishedAtMs < staleRunCutoffMs) continue;
         for (const comment of unresolved) {
           const commentCreatedAtMs = toTimestampMs(comment.createdAt);
           if (commentCreatedAtMs === null) continue;
