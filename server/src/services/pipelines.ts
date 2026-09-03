@@ -3426,10 +3426,15 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         .limit(1)
         .then((rows) => rows[0] ?? null);
       if (existingIssueLink?.issueId) {
-        // Reuse the existing automation issue — reset to todo + set assignee + wake heartbeat
+        // Reuse the existing automation issue — reset to in_progress + set assignee + wake heartbeat.
+        // Use in_progress (not todo): the one-time heartbeat wakeup below can be lost if the
+        // assigned agent is busy at fire time. in_progress issues are continuously monitored by
+        // the liveness system, which will keep re-dispatching until an agent picks it up.
+        // Using todo leaves the issue in a state that is invisible to liveness retries, causing
+        // silent indefinite stalls when the wakeup is missed (confirmed: DAI-306/DAI-308, 2026-09-03).
         await db
           .update(issues)
-          .set({ status: "todo", assigneeAgentId: routine.assigneeAgentId, updatedAt: nowDate() })
+          .set({ status: "in_progress", assigneeAgentId: routine.assigneeAgentId, updatedAt: nowDate() })
           .where(and(eq(issues.id, existingIssueLink.issueId), ne(issues.status, "done")));
         // Trigger the heartbeat to re-dispatch the agent on the reused issue
         if (deps.heartbeat && routine.assigneeAgentId) {
