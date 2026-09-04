@@ -18593,21 +18593,13 @@ export function issueRoutes(
       objectContentType: object.contentType,
       originalFilename: attachment.originalFilename,
     });
-    // Markdown bodies are stored as UTF-8; declare the charset so inline
-    // (raw) views do not mojibake. SVG/inline checks below stay on the bare type.
-    const isMarkdownResponse = isMarkdownAttachmentContent({
-      contentType: responseContentType,
-      originalFilename: attachment.originalFilename,
-    });
-    // Express formats filenames with an encoded Unicode parameter when needed.
-    res.attachment(attachment.originalFilename ?? "attachment");
     res.setHeader(
       "Content-Type",
       isMarkdownResponse
         ? `${responseContentType}; charset=utf-8`
         : responseContentType,
     );
-    res.setHeader("Cache-Control", "private, max-age=60");
+    res.setHeader("Cache-Control", "public, max-age=60");
     res.setHeader("X-Content-Type-Options", "nosniff");
     if (responseContentType === SVG_CONTENT_TYPE) {
       res.setHeader(
