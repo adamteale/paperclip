@@ -1362,8 +1362,15 @@ describeEmbeddedPostgres("pipelineService", () => {
     });
     expect(firstRetry.status).toBe("succeeded");
     expect(secondRetry.status).toBe("succeeded");
+    // Both retries resolve via the stage-re-entry reuse path (patch 0053): the crash-simulated
+    // execution shares this stage's automationId with the original dispatch, so it finds the
+    // already-linked execution issue, resets it, and returns -- without calling
+    // runPipelineStageEntryRoutine synchronously. Redispatch happens via the heartbeat.wakeup()
+    // call in that branch instead, which is a no-op under noopHeartbeat in this test. So exactly
+    // ONE routineRun exists after both retries (from the original dispatch only), not two -- this
+    // assertion predates patch 0053 and assumed retries always dispatch a fresh synchronous run.
     const runsAfterRetries = await db.select().from(routineRuns);
-    expect(runsAfterRetries).toHaveLength(2);
+    expect(runsAfterRetries).toHaveLength(1);
     const crashExecutions = await db
       .select()
       .from(pipelineAutomationExecutions)
@@ -1446,16 +1453,81 @@ describeEmbeddedPostgres("pipelineService", () => {
     expect(links).toHaveLength(2);
   });
 
-  // NOTE: a second automated test covering the done-issue-reset fix ("resets a done
-  // same-stage automation issue and redispatches on re-entry") was written and manually
-  // verified (fails on the pre-fix code, passes with the fix) but is NOT included here.
-  // It hits the same pre-existing, unrelated environmental issue that already breaks
-  // "fires a stage-entry automation routine once and keeps crash-retry idempotent" above
-  // (both fail when the automation dispatch machinery re-processes an automationId that
-  // already has execution history) -- not something introduced by this PR, but not
-  // reliably testable in this CI environment either. The fix itself was verified by
-  // swapping in the pre-fix file locally and confirming the test failed, then restoring
-  // the fix and confirming it passed.
+  it("resets a done same-stage automation issue and redispatches on re-entry", async () => {
+    const company = await seedCompany();
+    const routineA = await seedRoutine(company.id, "Stage A routine");
+    const routineB = await seedRoutine(company.id, "Stage B routine");
+    const pipeline = await svc.createPipeline({
+      companyId: company.id,
+      key: "same-stage-reentry",
+      name: "Same stage reentry",
+      actor: userActor,
+      stages: [
+        { key: "intake", name: "Intake", kind: "open" },
+        { key: "stage_a", name: "Stage A", kind: "working", config: { onEnter: { type: "run_routine", routineId: routineA.id } } },
+        { key: "stage_b", name: "Stage B", kind: "working", config: { onEnter: { type: "run_routine", routineId: routineB.id } } },
+        { key: "done", name: "Done", kind: "done" },
+        { key: "cancelled", name: "Cancelled", kind: "cancelled" },
+      ],
+    });
+    const stagesByKey = new Map((await svc.listStages(company.id, pipeline.id)).map((stage) => [stage.key, stage]));
+    const stageAAutomationId = `${stagesByKey.get("stage_a")!.id}:on_enter`;
+    const created = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "same-stage-case",
+      title: "Same stage case",
+      actor: userActor,
+    });
+
+    const movedToA = await svc.transitionCase({
+      companyId: company.id,
+      caseId: created.case.id,
+      toStageKey: "stage_a",
+      expectedVersion: 1,
+      actor: userActor,
+    });
+    const [firstExecution] = await db
+      .select()
+      .from(pipelineAutomationExecutions)
+      .where(eq(pipelineAutomationExecutions.automationId, stageAAutomationId));
+    const firstIssueId = firstExecution!.executionIssueId!;
+
+    // Simulate stage A's execution issue reaching a terminal "done" state before the case
+    // cycles back into stage A (e.g. the previous round's PR merged and disposition closed it).
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, firstIssueId));
+
+    const movedToB = await svc.transitionCase({
+      companyId: company.id,
+      caseId: created.case.id,
+      toStageKey: "stage_b",
+      expectedVersion: movedToA.case.version,
+      actor: userActor,
+    });
+    const movedBackToA = await svc.transitionCase({
+      companyId: company.id,
+      caseId: created.case.id,
+      toStageKey: "stage_a",
+      expectedVersion: movedToB.case.version,
+      actor: userActor,
+    });
+    expect(movedBackToA.automationExecution.status).toBe("succeeded");
+
+    const reenteredExecutions = await db
+      .select()
+      .from(pipelineAutomationExecutions)
+      .where(eq(pipelineAutomationExecutions.automationId, stageAAutomationId));
+    expect(reenteredExecutions).toHaveLength(2);
+    const reenteredExecution = reenteredExecutions.find((execution) => execution.id !== firstExecution!.id)!;
+    // Same-stage cycle-back correctly reuses the SAME issue...
+    expect(reenteredExecution.executionIssueId).toBe(firstIssueId);
+
+    // ...but must reset it out of "done" so the agent actually re-runs. Before the fix, the
+    // update excluded status="done", so the issue stayed done while this execution was still
+    // marked "succeeded" -- a silent stall with no dispatch and no error.
+    const [reusedIssue] = await db.select().from(issues).where(eq(issues.id, firstIssueId));
+    expect(reusedIssue!.status).not.toBe("done");
+  });
 
   it("carries saved stage automation workspace context into the execution issue", async () => {
     const { company, pipeline, byKey } = await seedPipeline();
