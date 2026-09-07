@@ -2974,15 +2974,28 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
             caseId: execution.caseId,
             config: breakdownConfig,
           })
-      // ── Reuse existing automation issue if one exists for this case+stage ──
+      // ── Reuse existing automation issue if one exists for this case+STAGE ──
       // When the pipeline cycles back to the same stage (e.g., implement -> pr_review
       // -> implement due to PR feedback), reuse the existing automation issue instead
       // of creating a new one. This keeps PR comments on the same issue so the agent
       // sees them, and avoids the "2 tickets" problem.
+      //
+      // MUST be scoped to automationId (this stage's on_enter), not just role=automation
+      // for the case. Without the automationId join below, ANY prior stage's execution
+      // issue (e.g. Brief's) satisfies this query, so the next stage's on_enter
+      // (e.g. Architect) silently "succeeds" by reusing the earlier, already-`done`
+      // issue instead of dispatching a real agent for its own routine — the case then
+      // sits at the new stage with no live run and no error anywhere (DAI-314/DF-288,
+      // 2026-09-07: confirmed via retry — dispatch kept reusing the closed Brief issue
+      // until the stale link was unlinked and a fresh execution issue was created).
       const existingIssueLink = await db
         .select({ issueId: pipelineCaseIssueLinks.issueId })
         .from(pipelineCaseIssueLinks)
         .innerJoin(issues, eq(issues.id, pipelineCaseIssueLinks.issueId))
+        .innerJoin(
+          pipelineAutomationExecutions,
+          eq(pipelineAutomationExecutions.id, pipelineCaseIssueLinks.automationAttemptId),
+        )
         .where(and(
           eq(pipelineCaseIssueLinks.companyId, execution.companyId),
           eq(pipelineCaseIssueLinks.caseId, execution.caseId),
@@ -2990,6 +3003,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
           isNull(pipelineCaseIssueLinks.retiredAt),
           ne(issues.status, "cancelled"),
           isNull(issues.cancelledAt),
+          eq(pipelineAutomationExecutions.automationId, execution.automationId),
         ))
         .orderBy(desc(pipelineCaseIssueLinks.createdAt))
         .limit(1)
