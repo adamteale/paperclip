@@ -184,6 +184,57 @@ describeEmbeddedPostgres("wake payload dispatch brief delivery", () => {
     expect(wakePayload?.issue?.descriptionTruncated).toBe(false);
   });
 
+  // Regression: 2026-09-08 (DAI-314/DF-288). The per-comment system-brief cap
+  // (48k chars) has no ceiling on how many of the up-to-8 inlined comments can
+  // be system-authored simultaneously. A ticket that cycles through many
+  // dispatch rounds (each posting its own system brief) accumulated 86
+  // comments; the inlined system-comment payload alone approached ~375KB and,
+  // duplicated across argv and an env var in the pi_local adapter, crossed the
+  // OS's combined ARG_MAX ceiling -- `spawn E2BIG` killed the agent process
+  // before it ever started. This test proves multiple system-authored
+  // comments now draw down a shared aggregate budget, independent of the
+  // per-comment cap.
+  it("caps the AGGREGATE size of multiple system-authored comments, not just each one", async () => {
+    const { companyId, issueId } = await seedIssue();
+    const briefIds = [randomUUID(), randomUUID(), randomUUID()];
+    // Each body is 40k chars -- comfortably under the 48k per-comment cap on
+    // its own, so any truncation observed here can only come from the new
+    // aggregate (96k) budget, not the pre-existing per-comment one.
+    const bodies = briefIds.map((_, i) => `brief ${i} `.repeat(5_000));
+    for (const body of bodies) expect(body.length).toBeGreaterThan(40_000 - 100);
+    await db.insert(issueComments).values(
+      briefIds.map((id, i) => ({
+        id,
+        companyId,
+        issueId,
+        authorType: "system" as const,
+        body: bodies[i]!,
+      })),
+    );
+
+    const wakePayload = await buildPaperclipWakePayload({
+      db,
+      companyId,
+      contextSnapshot: {
+        issueId,
+        wakeCommentIds: briefIds,
+        wakeReason: "issue_assigned",
+        source: "routine.dispatch",
+      },
+    });
+
+    const delivered = wakePayload?.comments as Array<{ id: string; body: string; bodyTruncated: boolean }>;
+    expect(delivered).toHaveLength(3);
+    // First two fit within the 96k aggregate budget (2 x ~40k <= 96k) whole.
+    expect(delivered.find((c) => c.id === briefIds[0])?.bodyTruncated).toBe(false);
+    expect(delivered.find((c) => c.id === briefIds[1])?.bodyTruncated).toBe(false);
+    // The third pushes the running total over 96k -- it must be truncated
+    // (or empty), never delivered whole, proving the aggregate cap fired.
+    const third = delivered.find((c) => c.id === briefIds[2])!;
+    expect(third.bodyTruncated).toBe(true);
+    expect(third.body.length).toBeLessThan(bodies[2]!.length);
+  });
+
   it("still truncates a regular issue description at the 12k inline cap", async () => {
     const longDescription = "y".repeat(13_000);
     const { companyId, issueId } = await seedIssue({ description: longDescription });

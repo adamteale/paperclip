@@ -371,6 +371,23 @@ const MAX_INLINE_WAKE_COMMENT_BODY_TOTAL_CHARS = 12_000;
 // competently but never transitioned the case). Deliver system comments whole
 // up to a generous ceiling, outside the human/agent comment body budget.
 const MAX_INLINE_WAKE_SYSTEM_COMMENT_BODY_CHARS = 48_000;
+// The per-comment ceiling above has no cap on how many of the up-to-8 inlined
+// comments can be system-authored simultaneously — a ticket that cycles
+// through many dispatch rounds (each posting its own system brief) can have
+// most or all 8 slots be system comments, multiplying out to ~384,000 chars
+// (8 x 48,000) inlined from this loop alone, BEFORE per-adapter prompt
+// assembly adds routine text, task markdown, etc. on top. That inlined
+// payload gets duplicated into both the assembled prompt AND (for pi_local)
+// a JSON env var, and on Linux argv + envp share one execve() ARG_MAX ceiling
+// (2MB on this box) -- a long-running ticket (86 comments accumulated over
+// many QA-fail/fix cycles) crossed it and `spawn E2BIG` killed the agent
+// process before it ever started (confirmed live, DAI-314/DF-288,
+// 2026-09-08). Give system comments their own aggregate ceiling, separate
+// from the human/agent budget, so "deliver system briefs whole" (the
+// 2026-08-26 fix above) can't alone blow the total past what's safe to
+// inline -- generous enough for a couple of full-size briefs, not unbounded
+// across dozens of dispatch rounds.
+const MAX_INLINE_WAKE_SYSTEM_COMMENT_BODY_TOTAL_CHARS = 96_000;
 // Routine-dispatch execution issues carry the routine plus the pipeline case
 // appendix as their description; same brief-delivery guarantee for the
 // description slot on adapters that render it inline.
@@ -5572,6 +5589,7 @@ export async function buildPaperclipWakePayload(input: {
     : issueDescription;
   const comments: Array<Record<string, unknown>> = [];
   let remainingBodyChars = MAX_INLINE_WAKE_COMMENT_BODY_TOTAL_CHARS;
+  let remainingSystemBodyChars = MAX_INLINE_WAKE_SYSTEM_COMMENT_BODY_TOTAL_CHARS;
   let truncated = false;
   let missingCommentCount = 0;
   const safeContinuationSummary =
@@ -5598,9 +5616,12 @@ export async function buildPaperclipWakePayload(input: {
     const isSystemAuthored = authorType === "system";
     // System dispatch briefs carry the assignment; they are delivered whole up
     // to their own generous ceiling and never consume the human/agent comment
-    // body budget (see MAX_INLINE_WAKE_SYSTEM_COMMENT_BODY_CHARS).
+    // body budget (see MAX_INLINE_WAKE_SYSTEM_COMMENT_BODY_CHARS) -- but they
+    // DO draw down their own separate aggregate budget, so many large system
+    // comments on one long-running ticket can't multiply out unbounded (see
+    // MAX_INLINE_WAKE_SYSTEM_COMMENT_BODY_TOTAL_CHARS).
     const allowedBodyChars = isSystemAuthored
-      ? MAX_INLINE_WAKE_SYSTEM_COMMENT_BODY_CHARS
+      ? Math.min(MAX_INLINE_WAKE_SYSTEM_COMMENT_BODY_CHARS, remainingSystemBodyChars)
       : Math.min(MAX_INLINE_WAKE_COMMENT_BODY_CHARS, remainingBodyChars);
     if (allowedBodyChars <= 0) {
       truncated = true;
@@ -5610,7 +5631,8 @@ export async function buildPaperclipWakePayload(input: {
     const body = fullBody.length > allowedBodyChars ? fullBody.slice(0, allowedBodyChars) : fullBody;
     const bodyTruncated = body.length < fullBody.length;
     if (bodyTruncated) truncated = true;
-    if (!isSystemAuthored) remainingBodyChars -= body.length;
+    if (isSystemAuthored) remainingSystemBodyChars -= body.length;
+    else remainingBodyChars -= body.length;
 
     comments.push({
       id: row.id,

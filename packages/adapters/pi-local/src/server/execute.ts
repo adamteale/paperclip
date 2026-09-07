@@ -236,7 +236,6 @@ export interface BuildArgsOptions {
   thinking: string;
   skillsDir: string;
   extraArgs: string[];
-  userPrompt: string;
 }
 
 /**
@@ -270,8 +269,20 @@ export function buildArgs(sessionFile: string, opts: BuildArgsOptions): string[]
 
   if (opts.extraArgs.length > 0) args.push(...opts.extraArgs);
 
-  // Add the user prompt as the last argument
-  args.push(opts.userPrompt);
+  // The user prompt is NOT pushed as a positional argument here -- it's piped
+  // via stdin at the process-spawn call instead (see runAttempt below). pi
+  // reads a piped, non-TTY stdin as an additional message part (readPipedStdin
+  // + buildInitialMessage in pi's own CLI), so this works exactly like
+  // claude-local/codex-local/cursor-local/opencode-local, which all pass their
+  // prompt via stdin rather than argv.
+  //
+  // This existed as `args.push(opts.userPrompt)` until 2026-09-08: pi_local
+  // and gemini_local were the only two local adapters putting the (unbounded)
+  // assembled prompt on argv, which shares the same OS ARG_MAX ceiling as the
+  // env block passed to the same spawn() call. A long-running ticket (86
+  // comments, ~826KB) crossed that ceiling and every QA dispatch for it failed
+  // immediately with `spawn E2BIG` -- the agent process never started at all
+  // (confirmed live, DAI-314/DF-288, 2026-09-07).
 
   return args;
 }
@@ -759,7 +770,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         thinking,
         skillsDir: remoteSkillsDir ?? PI_AGENT_SKILLS_DIR,
         extraArgs,
-        userPrompt,
       });
       if (onMeta) {
         await onMeta({
@@ -801,6 +811,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
         cwd,
         env: executionTargetIsRemote ? env : runtimeEnv,
+        stdin: userPrompt,
         timeoutSec,
         graceSec,
         onSpawn,
