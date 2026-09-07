@@ -1467,8 +1467,15 @@ describeEmbeddedPostgres("pipelineService", () => {
     });
     expect(firstRetry.status).toBe("succeeded");
     expect(secondRetry.status).toBe("succeeded");
+    // Both retries resolve via the stage-re-entry reuse path (patch 0053): the crash-simulated
+    // execution shares this stage's automationId with the original dispatch, so it finds the
+    // already-linked execution issue, resets it, and returns -- without calling
+    // runPipelineStageEntryRoutine synchronously. Redispatch happens via the heartbeat.wakeup()
+    // call in that branch instead, which is a no-op under noopHeartbeat in this test. So exactly
+    // ONE routineRun exists after both retries (from the original dispatch only), not two -- this
+    // assertion predates patch 0053 and assumed retries always dispatch a fresh synchronous run.
     const runsAfterRetries = await db.select().from(routineRuns);
-    expect(runsAfterRetries).toHaveLength(2);
+    expect(runsAfterRetries).toHaveLength(1);
     const crashExecutions = await db
       .select()
       .from(pipelineAutomationExecutions)
