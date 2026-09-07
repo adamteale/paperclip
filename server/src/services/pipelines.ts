@@ -3446,10 +3446,17 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         // the liveness system, which will keep re-dispatching until an agent picks it up.
         // Using todo leaves the issue in a state that is invisible to liveness retries, causing
         // silent indefinite stalls when the wakeup is missed (confirmed: DAI-306/DAI-308, 2026-09-03).
+        //
+        // Do NOT exclude status="done": this issue was found via the same-stage-scoped query
+        // above (automationId join), so "done" here means "the previous run of THIS stage's
+        // automation completed" -- exactly the re-entry case reuse exists for. Excluding it left
+        // the issue stuck at "done" while the code below still marked the automation execution
+        // "succeeded" and returned without ever calling runPipelineStageEntryRoutine -- a silent
+        // stall with no dispatch and no error (found via upstream review on PR #13004).
         await db
           .update(issues)
           .set({ status: "in_progress", assigneeAgentId: routine.assigneeAgentId, updatedAt: nowDate() })
-          .where(and(eq(issues.id, existingIssueLink.issueId), ne(issues.status, "done")));
+          .where(eq(issues.id, existingIssueLink.issueId));
         // Trigger the heartbeat to re-dispatch the agent on the reused issue
         if (deps.heartbeat && routine.assigneeAgentId) {
           await deps.heartbeat.wakeup(routine.assigneeAgentId, {
