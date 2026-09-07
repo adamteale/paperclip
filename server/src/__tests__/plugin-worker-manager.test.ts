@@ -6,6 +6,7 @@ import {
   createHostClientHandlers,
   JsonRpcCallError,
   PLUGIN_RPC_ERROR_CODES,
+  type HostClientHandlers,
   type HostServices,
   type HostToWorkerMethods,
 } from "@paperclipai/plugin-sdk";
@@ -289,6 +290,255 @@ describe("plugin-worker-manager stderr failure context", () => {
     } finally {
       await handle.stop().catch(() => undefined);
     }
+  });
+
+  it("registers an unrestricted invocation scope for runJob so nested worker host calls succeed", async () => {
+    // Regression test for #9310: runJob dispatches previously derived no
+    // invocation scope at all (no case in deriveInvocationScope), so a job's
+    // own nested host calls had no invocation id to echo. That made them
+    // indistinguishable from a call that lost track of a scope it should
+    // have had, and contextForWorkerMessage's fallback denied them whenever
+    // any OTHER scoped invocation (performAction/executeTool/onEvent)
+    // happened to be active at the same moment -- intermittent under real
+    // event traffic, invisible on a quiet instance. Jobs are instance-scoped
+    // (a single tick can touch many companies), so the fix registers a real
+    // but unrestricted ({ companyId: "" }) invocation rather than picking one
+    // company to lock to.
+    //
+    // The context passed to the handler now reflects proactive company
+    // resolution: a call to a *configured* company receives that company's
+    // explicit scope rather than the unrestricted "" sentinel.
+    const companiesGet = vi.fn(async (
+      params: { companyId: string },
+      context?: { invocationScope?: { companyId?: string | null } | null },
+    ) => ({
+      id: params.companyId,
+      scopedCompanyId: context?.invocationScope?.companyId ?? null,
+    }));
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: {
+        instanceId: "instance-1",
+        hostVersion: "1.0.0",
+      },
+      apiVersion: 1,
+      // "company-a" is a configured company: proactive resolution resolves
+      // its scope so the SDK gate can admit the call.
+      proactiveCompanyScopes: ["company-a"],
+      hostHandlers: {
+        "companies.get": companiesGet as never,
+      },
+    });
+
+    try {
+      await handle.start();
+
+      await expect(handle.call("runJob", {
+        job: {
+          jobKey: "test.job",
+          runId: "run-1",
+          trigger: "schedule",
+          scheduledAt: new Date().toISOString(),
+        },
+        params: {
+          mode: "echo",
+          requestedCompanyId: "company-a",
+        },
+      } as never)).resolves.toEqual({
+        id: "company-a",
+        scopedCompanyId: "company-a",
+      });
+      expect(companiesGet).toHaveBeenCalledWith(
+        { companyId: "company-a" },
+        { invocationScope: { companyId: "company-a" } },
+      );
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  describe("runJob proactive-resolution through the real SDK gate", () => {
+    // These tests use createHostClientHandlers as hostHandlers (not plain mock
+    // functions) so that requireInvocationCompanyScope is exercised end-to-end.
+    // proactiveCompanyScopes: ["company-configured"] — "company-other" is not.
+    //
+    // Covers the three scenarios named in the PR review:
+    //   1. Instance-scoped (kind-"none") call succeeds while a scoped
+    //      performAction/onEvent invocation is also registered (the original
+    //      intermittent-denial bug scenario).
+    //   2. A company-referencing call for a *configured* company still succeeds.
+    //   3. A company-referencing call for an *unconfigured* company is denied.
+    //      (Pre-fix this silently passed when no concurrent invocation was active;
+    //      that was the security gap closed by contextForWorkerMessage's proactive
+    //      resolution for the empty-scope runJob invocation.)
+
+    const makeHandle = () => {
+      const stateGet = vi.fn(async () => null as unknown);
+      const agentsList = vi.fn(async () => [] as unknown[]);
+      const handlers = createHostClientHandlers({
+        pluginId: "test.plugin",
+        capabilities: ["plugin.state.read", "agents.read"],
+        services: {
+          state: { get: stateGet },
+          agents: { list: agentsList },
+        } as unknown as HostServices,
+      });
+      const stateGetContexts: Array<{ stateKey: string; context?: unknown }> = [];
+      const agentsListContexts: Array<{ companyId: string; context?: unknown }> = [];
+      const gatedStateGet = handlers["state.get"];
+      const gatedAgentsList = handlers["agents.list"];
+      const observedHandlers = handlers as HostClientHandlers;
+      observedHandlers["state.get"] = async (params, context) => {
+        stateGetContexts.push({ stateKey: params.stateKey, context });
+        return gatedStateGet(params, context);
+      };
+      observedHandlers["agents.list"] = async (params, context) => {
+        agentsListContexts.push({ companyId: params.companyId, context });
+        return gatedAgentsList(params, context);
+      };
+      const handle = createPluginWorkerHandle("test.plugin", {
+        entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+        manifest: TEST_MANIFEST,
+        config: {},
+        instanceInfo: { instanceId: "instance-1", hostVersion: "1.0.0" },
+        apiVersion: 1,
+        proactiveCompanyScopes: ["company-configured"],
+        hostHandlers: observedHandlers,
+      });
+      return { handle, stateGet, stateGetContexts, agentsList, agentsListContexts };
+    };
+
+    it("instance-scoped (kind-none) call succeeds even when another scoped invocation is also registered", async () => {
+      // Scenario 1 (original intermittent bug): without the fix, runJob had no
+      // registered invocation, so its nested calls echoed no id. When another
+      // company-scoped call was concurrently active in activeInvocations,
+      // contextForWorkerMessage's fallback returned {invalidInvocationScope:true}
+      // and the SDK gate denied the call. Post-fix, runJob registers a real
+      // (empty-scope) invocation; the echo path applies proactive resolution
+      // which, for a kind-"none" call where referencedCompanyId returns null,
+      // returns the unrestricted scope — the SDK gate's kind-"none" early exit
+      // admits it regardless of allowedCompanyId.
+      //
+      // Promise.all registers both invocations synchronously before the worker
+      // processes either message, which mirrors the concurrent-load shape of the
+      // original bug. The onEvent dispatch uses the event.companyId scope
+      // derivation that the reviewer called out, while the runJob dispatch uses
+      // an instance-scoped state.get so it goes through the same capability path
+      // without needing companies.read.
+      const { handle, stateGet, stateGetContexts } = makeHandle();
+      try {
+        await handle.start();
+
+        await Promise.all([
+          // A concurrent company-scoped onEvent registers a non-null
+          // invocationId in activeInvocations alongside the runJob invocation.
+          handle.call("onEvent", {
+            event: { companyId: "company-configured" },
+            params: {
+              mode: "echo",
+              hostMethod: "state.get",
+              nestedScopeKind: "instance",
+              stateKey: "concurrent-probe",
+            },
+          } as never),
+          // runJob makes an instance-scoped state.get call — kind-"none".
+          handle.call("runJob", {
+            job: { jobKey: "test.job", runId: "run-2", trigger: "schedule", scheduledAt: new Date().toISOString() },
+            params: {
+              mode: "echo",
+              hostMethod: "state.get",
+              nestedScopeKind: "instance",
+              stateKey: "runjob-instance",
+            },
+          } as never),
+        ]);
+
+        // stateGet is called once for onEvent's nested call and once for
+        // runJob's nested call. Verify the runJob call arrived and was not
+        // denied (the SDK gate's kind-"none" fast path means the service is
+        // reached — if the gate had thrown, stateGet would not be called for
+        // "runjob-instance").
+        expect(stateGet).toHaveBeenCalledWith(
+          expect.objectContaining({ scopeKind: "instance", stateKey: "runjob-instance" }),
+        );
+        expect(stateGetContexts).toContainEqual({
+          stateKey: "runjob-instance",
+          context: { invocationScope: { companyId: "" } },
+        });
+      } finally {
+        await handle.stop().catch(() => undefined);
+      }
+    });
+
+    it("company-referencing call for a configured company succeeds from a runJob invocation", async () => {
+      // Scenario 2: proactive resolution maps the echoed empty-scope invocation
+      // to company-configured's explicit scope so requireInvocationCompanyScope
+      // admits the agents.list call. Pre-fix, this also succeeded via the no-id
+      // proactive path (as long as no concurrent invocation was active). Post-fix
+      // it succeeds via the proper invocation-echo path instead.
+      const { handle, agentsList, agentsListContexts } = makeHandle();
+      try {
+        await handle.start();
+
+        await expect(handle.call("runJob", {
+          job: { jobKey: "test.job", runId: "run-3", trigger: "schedule", scheduledAt: new Date().toISOString() },
+          params: {
+            mode: "echo",
+            hostMethod: "agents.list",
+            requestedCompanyId: "company-configured",
+          },
+        } as never)).resolves.toBeDefined();
+
+        // The service is reached only if the SDK gate passed — verify the call
+        // arrived with the expected company id.
+        expect(agentsList).toHaveBeenCalledWith(
+          { companyId: "company-configured" },
+        );
+        expect(agentsListContexts).toContainEqual({
+          companyId: "company-configured",
+          context: { invocationScope: { companyId: "company-configured" } },
+        });
+      } finally {
+        await handle.stop().catch(() => undefined);
+      }
+    });
+
+    it("company-referencing call for an unconfigured company is denied from a runJob invocation", async () => {
+      // Scenario 3: the pre-fix behaviour was to return {} (no scope) for
+      // unconfigured companies when no concurrent invocation was active. The SDK
+      // gate's `if (!allowedCompanyId) return` then silently allowed the call —
+      // a security gap. Post-fix, contextForWorkerMessage returns
+      // {invalidInvocationScope:true} because referencedCompanyId returns a
+      // non-null company id that is absent from proactiveCompanyScopes. The
+      // SDK gate then throws InvocationScopeDeniedError, which propagates back
+      // through the worker fixture and rejects the outer runJob call.
+      const { handle, agentsList, agentsListContexts } = makeHandle();
+      try {
+        await handle.start();
+
+        await expect(handle.call("runJob", {
+          job: { jobKey: "test.job", runId: "run-4", trigger: "schedule", scheduledAt: new Date().toISOString() },
+          params: {
+            mode: "echo",
+            hostMethod: "agents.list",
+            requestedCompanyId: "company-other",
+          },
+        } as never)).rejects.toMatchObject({
+          code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+        });
+
+        // Service must not be reached when the gate denies the call.
+        expect(agentsList).not.toHaveBeenCalled();
+        expect(agentsListContexts).toContainEqual({
+          companyId: "company-other",
+          context: { invalidInvocationScope: true },
+        });
+      } finally {
+        await handle.stop().catch(() => undefined);
+      }
+    });
   });
 
   it("passes echoed invocation scope to worker-to-host handlers", async () => {
