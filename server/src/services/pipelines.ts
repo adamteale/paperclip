@@ -2974,6 +2974,7 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
             caseId: execution.caseId,
             config: breakdownConfig,
           })
+        : null;
       // ── Reuse existing automation issue if one exists for this case+STAGE ──
       // When the pipeline cycles back to the same stage (e.g., implement -> pr_review
       // -> implement due to PR feedback), reuse the existing automation issue instead
@@ -3009,11 +3010,17 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         .limit(1)
         .then((rows) => rows[0] ?? null);
       if (existingIssueLink?.issueId) {
-        // Reuse the existing automation issue — reset to todo so the agent re-runs
+        // Reuse the existing automation issue — reset to todo so the agent re-runs.
+        // Do NOT exclude status="done": this issue was found via the same-stage-scoped
+        // query above, so "done" here means "the previous run of THIS stage's automation
+        // completed" -- exactly the re-entry case reuse exists for. Excluding it left the
+        // issue stuck at "done" while the code below still marked the automation execution
+        // "succeeded" and returned without ever calling runPipelineStageEntryRoutine --
+        // a silent stall with no dispatch and no error.
         await db
           .update(issues)
           .set({ status: "todo", updatedAt: nowDate() })
-          .where(and(eq(issues.id, existingIssueLink.issueId), ne(issues.status, "done")));
+          .where(eq(issues.id, existingIssueLink.issueId));
         const [reused] = await db
           .update(pipelineAutomationExecutions)
           .set({
