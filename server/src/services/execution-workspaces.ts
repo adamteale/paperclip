@@ -1075,16 +1075,25 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         eq(issues.companyId, workspace.companyId),
         sql<boolean>`
           ${issues.id} IN (
-            WITH RECURSIVE issue_tree(id) AS (
-              SELECT ${issues.id}
+            -- path + NOT id=ANY(path) guards against a corrupted parent_id
+            -- cycle recursing forever (confirmed live on DAI 2026-09-08: an
+            -- unguarded version of this exact query looped for 25+ minutes
+            -- per invocation on a 2-node parent_id cycle, and 10 stacked
+            -- invocations pinned the CPU hard enough to take the whole
+            -- server down). parent_id is single-valued so a healthy tree
+            -- never revisits a node; this only ever trims a cycle, it
+            -- can't drop legitimate descendants.
+            WITH RECURSIVE issue_tree(id, path) AS (
+              SELECT ${issues.id}, ARRAY[${issues.id}]
               FROM ${issues}
               WHERE ${issues.companyId} = ${workspace.companyId}
                 AND ${issues.id} = ${workspace.sourceIssueId}
               UNION ALL
-              SELECT child.id
+              SELECT child.id, parent.path || child.id
               FROM ${issues} child
               JOIN issue_tree parent ON child.parent_id = parent.id
               WHERE child.company_id = ${workspace.companyId}
+                AND NOT (child.id = ANY(parent.path))
             )
             SELECT id FROM issue_tree
           )
@@ -2115,16 +2124,20 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
                 AND live_run.status IN ('queued', 'running')
             )`,
             sql<boolean>`NOT EXISTS (
-              WITH RECURSIVE issue_tree(id, status) AS (
-                SELECT root.id, root.status
+              -- path + NOT id=ANY(path) guards against a corrupted parent_id
+              -- cycle recursing forever (see listWorkspaceIssueTree above for
+              -- the incident this hardens against — same query shape).
+              WITH RECURSIVE issue_tree(id, status, path) AS (
+                SELECT root.id, root.status, ARRAY[root.id]
                 FROM ${issues} root
                 WHERE root.company_id = ${workspace.companyId}
                   AND root.id = ${workspace.sourceIssueId}
                 UNION ALL
-                SELECT child.id, child.status
+                SELECT child.id, child.status, parent.path || child.id
                 FROM ${issues} child
                 JOIN issue_tree parent ON child.parent_id = parent.id
                 WHERE child.company_id = ${workspace.companyId}
+                  AND NOT (child.id = ANY(parent.path))
               )
               SELECT 1 FROM issue_tree WHERE status NOT IN ('done', 'cancelled')
             )`,

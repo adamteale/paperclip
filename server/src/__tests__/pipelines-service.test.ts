@@ -1558,6 +1558,89 @@ describeEmbeddedPostgres("pipelineService", () => {
     expect(links).toHaveLength(2);
   });
 
+  it("does not create a parent_id cycle when a useOriginIssue stage follows a stage that created its own automation issue", async () => {
+    // Regression for the DAI-324/DAI-325 incident (2026-09-08): stage_a creates
+    // a fresh routine_execution child issue, correctly parented under the
+    // case's work-linked (origin) issue. stage_b's useOriginIssue then reuses
+    // the origin issue itself as its executionIssueId. Before the fix, the
+    // shared "insert automation link + auto-parent" cascade ran unconditionally
+    // afterwards and re-parented the ORIGIN issue under stage_a's child issue —
+    // a 2-node parent_id cycle that made every recursive issue-hierarchy query
+    // loop forever and took the whole server down via CPU starvation.
+    const company = await seedCompany();
+    const routineA = await seedRoutine(company.id, "Stage A routine");
+    const routineB = await seedRoutine(company.id, "Stage B routine (useOriginIssue)");
+    const pipeline = await svc.createPipeline({
+      companyId: company.id,
+      key: "origin-issue-cycle",
+      name: "Origin issue cycle",
+      actor: userActor,
+      stages: [
+        { key: "intake", name: "Intake", kind: "open" },
+        { key: "stage_a", name: "Stage A", kind: "working", config: { onEnter: { type: "run_routine", routineId: routineA.id } } },
+        { key: "stage_b", name: "Stage B", kind: "working", config: { onEnter: { type: "run_routine", routineId: routineB.id, useOriginIssue: true } } },
+        { key: "done", name: "Done", kind: "done" },
+        { key: "cancelled", name: "Cancelled", kind: "cancelled" },
+      ],
+    });
+    const created = await svc.ingestCase({
+      companyId: company.id,
+      pipelineId: pipeline.id,
+      caseKey: "origin-issue-cycle-case",
+      title: "Origin issue cycle case",
+      actor: userActor,
+    });
+    const originIssue = await seedLinkedIssue({ companyId: company.id, caseId: created.case.id, role: "work", status: "todo" });
+
+    const movedToA = await svc.transitionCase({
+      companyId: company.id,
+      caseId: created.case.id,
+      toStageKey: "stage_a",
+      expectedVersion: 1,
+      actor: userActor,
+    });
+    expect(movedToA.automationExecution.status).toBe("succeeded");
+    const stageAIssueId = movedToA.automationExecution.status === "succeeded"
+      ? movedToA.automationExecution.execution.executionIssueId!
+      : (() => { throw new Error("unreachable"); })();
+    expect(stageAIssueId).not.toBe(originIssue.id); // stage_a created its own child issue
+
+    // stage_a's fresh child issue is correctly parented under the origin issue.
+    const [stageAIssue] = await db.select().from(issues).where(eq(issues.id, stageAIssueId));
+    expect(stageAIssue!.parentId).toBe(originIssue.id);
+
+    const movedToB = await svc.transitionCase({
+      companyId: company.id,
+      caseId: created.case.id,
+      toStageKey: "stage_b",
+      expectedVersion: movedToA.case.version,
+      actor: userActor,
+    });
+    expect(movedToB.automationExecution.status).toBe("succeeded");
+    // stage_b reused the origin issue itself, per useOriginIssue.
+    const stageBIssueId = movedToB.automationExecution.status === "succeeded"
+      ? movedToB.automationExecution.execution.executionIssueId!
+      : (() => { throw new Error("unreachable"); })();
+    expect(stageBIssueId).toBe(originIssue.id);
+
+    // The regression: the origin issue's parentId must NOT have been
+    // overwritten to point at stage_a's child issue (which would form a
+    // 2-node cycle with stageAIssue.parentId === originIssue.id above).
+    const [freshOrigin] = await db.select().from(issues).where(eq(issues.id, originIssue.id));
+    expect(freshOrigin!.parentId).toBeNull();
+
+    // The origin issue must not have gained a spurious "automation" role link either.
+    const originAutomationLinks = await db
+      .select()
+      .from(pipelineCaseIssueLinks)
+      .where(and(
+        eq(pipelineCaseIssueLinks.caseId, created.case.id),
+        eq(pipelineCaseIssueLinks.issueId, originIssue.id),
+        eq(pipelineCaseIssueLinks.role, "automation"),
+      ));
+    expect(originAutomationLinks).toHaveLength(0);
+  });
+
   it("resets a done same-stage automation issue and redispatches on re-entry", async () => {
     const company = await seedCompany();
     const routineA = await seedRoutine(company.id, "Stage A routine");

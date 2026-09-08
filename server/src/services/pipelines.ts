@@ -3558,59 +3558,75 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
         })
         .where(eq(pipelineAutomationExecutions.id, execution.id))
         .returning();
-      await db
-        .insert(pipelineCaseIssueLinks)
-        .values({
-          companyId: execution.companyId,
-          caseId: execution.caseId,
-          issueId: run.linkedIssueId,
-          role: "automation",
-          createdByRunId: null,
-          automationAttemptId: execution.id,
-        })
-        .onConflictDoNothing({ target: [pipelineCaseIssueLinks.caseId, pipelineCaseIssueLinks.issueId] });
-      // Auto-parent the execution issue so it appears as a child in the board view.
-      // Cascade: parent under the most recent PREVIOUS stage's automation issue
-      // (so brief → design → implement form a chain, not flat siblings).
-      // Supports branching: if implement splits into multiple issues, they all
-      // parent under the design issue (the most recent previous automation).
-      // First stage (no previous automation): fall back to the work-linked issue.
-      const previousAutomation = await db
-        .select({ issueId: pipelineCaseIssueLinks.issueId })
-        .from(pipelineCaseIssueLinks)
-        .where(and(
-          eq(pipelineCaseIssueLinks.companyId, execution.companyId),
-          eq(pipelineCaseIssueLinks.caseId, execution.caseId),
-          eq(pipelineCaseIssueLinks.role, "automation"),
-          ne(pipelineCaseIssueLinks.issueId, run.linkedIssueId),
-          isNull(pipelineCaseIssueLinks.retiredAt),
-        ))
-        .orderBy(desc(pipelineCaseIssueLinks.createdAt))
-        .limit(1)
-        .then((rows) => rows[0] ?? null);
-      if (previousAutomation) {
+      // Skip the "automation" link + auto-parent cascade below when this stage
+      // used useOriginIssue: run.linkedIssueId is then the case's own primary
+      // work/origin issue (originIssueId), not a freshly created per-stage
+      // child. The cascade below assumes linkedIssueId is always a NEW child
+      // issue that needs linking + parenting under the previous stage's issue;
+      // applying it to the origin issue itself re-parents the ROOT ticket
+      // under whatever child issue was most recently created (e.g. a prior
+      // stage's routine_execution "Brief" issue) — which, since that child is
+      // already parented under the origin issue, produces a 2-node parent_id
+      // cycle. That cycle then makes every recursive issue-hierarchy query
+      // (blocker checks, board tree walks) loop forever, pinning the CPU and
+      // taking the whole server down (confirmed live on DAI, 2026-09-08 — see
+      // DAI-324/DAI-325). The origin issue already has its permanent
+      // work/origin link from ingest and must never be re-linked or re-parented.
+      if (!originIssueId) {
         await db
-          .update(issues)
-          .set({ parentId: previousAutomation.issueId, updatedAt: nowDate() })
-          .where(eq(issues.id, run.linkedIssueId));
-      } else {
-        // First stage: parent under the case's primary work-linked issue (root ticket)
-        const workLink = await db
+          .insert(pipelineCaseIssueLinks)
+          .values({
+            companyId: execution.companyId,
+            caseId: execution.caseId,
+            issueId: run.linkedIssueId,
+            role: "automation",
+            createdByRunId: null,
+            automationAttemptId: execution.id,
+          })
+          .onConflictDoNothing({ target: [pipelineCaseIssueLinks.caseId, pipelineCaseIssueLinks.issueId] });
+        // Auto-parent the execution issue so it appears as a child in the board view.
+        // Cascade: parent under the most recent PREVIOUS stage's automation issue
+        // (so brief → design → implement form a chain, not flat siblings).
+        // Supports branching: if implement splits into multiple issues, they all
+        // parent under the design issue (the most recent previous automation).
+        // First stage (no previous automation): fall back to the work-linked issue.
+        const previousAutomation = await db
           .select({ issueId: pipelineCaseIssueLinks.issueId })
           .from(pipelineCaseIssueLinks)
           .where(and(
             eq(pipelineCaseIssueLinks.companyId, execution.companyId),
             eq(pipelineCaseIssueLinks.caseId, execution.caseId),
-            eq(pipelineCaseIssueLinks.role, "work"),
+            eq(pipelineCaseIssueLinks.role, "automation"),
+            ne(pipelineCaseIssueLinks.issueId, run.linkedIssueId),
+            isNull(pipelineCaseIssueLinks.retiredAt),
           ))
-          .orderBy(asc(pipelineCaseIssueLinks.createdAt))
+          .orderBy(desc(pipelineCaseIssueLinks.createdAt))
           .limit(1)
           .then((rows) => rows[0] ?? null);
-        if (workLink) {
+        if (previousAutomation) {
           await db
             .update(issues)
-            .set({ parentId: workLink.issueId, updatedAt: nowDate() })
+            .set({ parentId: previousAutomation.issueId, updatedAt: nowDate() })
             .where(eq(issues.id, run.linkedIssueId));
+        } else {
+          // First stage: parent under the case's primary work-linked issue (root ticket)
+          const workLink = await db
+            .select({ issueId: pipelineCaseIssueLinks.issueId })
+            .from(pipelineCaseIssueLinks)
+            .where(and(
+              eq(pipelineCaseIssueLinks.companyId, execution.companyId),
+              eq(pipelineCaseIssueLinks.caseId, execution.caseId),
+              eq(pipelineCaseIssueLinks.role, "work"),
+            ))
+            .orderBy(asc(pipelineCaseIssueLinks.createdAt))
+            .limit(1)
+            .then((rows) => rows[0] ?? null);
+          if (workLink) {
+            await db
+              .update(issues)
+              .set({ parentId: workLink.issueId, updatedAt: nowDate() })
+              .where(eq(issues.id, run.linkedIssueId));
+          }
         }
       }
       await writeCaseEvent(db, {
