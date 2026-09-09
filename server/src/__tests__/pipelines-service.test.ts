@@ -2546,6 +2546,103 @@ describeEmbeddedPostgres("pipelineService", () => {
       expect(await stageKeyOfCase(created.case.id)).toBe("review");
     });
 
+    // Regression tests for the DAI-326 incident (2026-09-09): a `ci_gate`
+    // stage's `statuses`-only `autoAdvanceOnIssue` rule has no concept of CI
+    // at all — it is satisfied the moment a linked work issue's status
+    // returns to `in_review`, regardless of whether that happened because a
+    // new commit passed CI or because an agent simply re-ran the "open PR"
+    // flow on the SAME failing commit. Live incident: DAI-326's PR failed CI
+    // (Storybook tests), the CI-failure webhook correctly bounced the case to
+    // `implement`, but the re-dispatched Coder pushed no new commit — it just
+    // idempotently re-posted the same PR and flipped the issue back to
+    // `in_review`. The case sailed straight through `ci_gate` into
+    // `qa_review` with the same commit still red on GitHub.
+    async function seedCiGatePipeline(companyId: string) {
+      return svc.createPipeline({
+        companyId,
+        key: `ci-gate-${randomUUID().slice(0, 8)}`,
+        name: "CI gate",
+        enforceTransitions: false,
+        actor: userActor,
+        stages: [
+          { key: "intake", name: "Intake", kind: "open" },
+          { key: "ci_gate", name: "CI gate", kind: "working", config: {
+            autoAdvanceOnIssue: { toStageKey: "qa_review", statuses: ["in_review"], roles: ["work"] },
+          } },
+          { key: "qa_review", name: "QA review", kind: "working" },
+          { key: "done", name: "Done", kind: "done" },
+          { key: "cancelled", name: "Cancelled", kind: "cancelled" },
+        ],
+      });
+    }
+
+    async function seedCaseAtCiGateStage(caseKey: string) {
+      const company = await seedCompany();
+      const pipeline = await seedCiGatePipeline(company.id);
+      const created = await svc.ingestCase({
+        companyId: company.id,
+        pipelineId: pipeline.id,
+        caseKey,
+        title: caseKey,
+        actor: userActor,
+      });
+      const issue = await seedLinkedIssue({
+        companyId: company.id,
+        caseId: created.case.id,
+        role: "work",
+        status: "in_progress",
+      });
+      await svc.transitionCase({
+        companyId: company.id,
+        caseId: created.case.id,
+        toStageKey: "ci_gate",
+        expectedVersion: created.case.version,
+        actor: userActor,
+      });
+      return { company, created, issue };
+    }
+
+    it("advances a ci_gate stage on status alone when no CI outcome has been recorded (CI not wired up)", async () => {
+      const { created, issue } = await seedCaseAtCiGateStage("ci-gate-no-signal");
+      await db.update(issues).set({ status: "in_review" }).where(eq(issues.id, issue.id));
+      const result = await svc.sweepIssueGateCases();
+      expect(result.advanced).toBe(1);
+      expect(await stageKeyOfCase(created.case.id)).toBe("qa_review");
+    });
+
+    it("does not advance a ci_gate stage on status alone when the last recorded CI outcome is a failure", async () => {
+      const { created, issue } = await seedCaseAtCiGateStage("ci-gate-ci-failed");
+      await db.update(issues).set({ status: "in_review" }).where(eq(issues.id, issue.id));
+      // Stamped by paperclip-company-defaults' driveCiGateFromWorkflowRun on the
+      // workflow_run that actually failed — the same commit the re-dispatched
+      // Coder re-posted without changing.
+      await db.update(pipelineCases)
+        .set({ fields: { ciStatus: "failure", ciRunUrl: "https://example/actions/runs/1" } })
+        .where(eq(pipelineCases.id, created.case.id));
+      const result = await svc.sweepIssueGateCases();
+      expect(result.advanced).toBe(0);
+      expect(await stageKeyOfCase(created.case.id)).toBe("ci_gate");
+    });
+
+    it("advances a ci_gate stage once a fresh CI success supersedes a recorded failure", async () => {
+      const { created, issue } = await seedCaseAtCiGateStage("ci-gate-ci-recovered");
+      await db.update(issues).set({ status: "in_review" }).where(eq(issues.id, issue.id));
+      await db.update(pipelineCases)
+        .set({ fields: { ciStatus: "failure", ciRunUrl: "https://example/actions/runs/1" } })
+        .where(eq(pipelineCases.id, created.case.id));
+      let result = await svc.sweepIssueGateCases();
+      expect(result.advanced).toBe(0);
+
+      // A new commit's workflow_run comes back green — the webhook handler
+      // stamps the latest outcome, superseding the stale failure.
+      await db.update(pipelineCases)
+        .set({ fields: { ciStatus: "success", ciRunUrl: "https://example/actions/runs/2" } })
+        .where(eq(pipelineCases.id, created.case.id));
+      result = await svc.sweepIssueGateCases();
+      expect(result.advanced).toBe(1);
+      expect(await stageKeyOfCase(created.case.id)).toBe("qa_review");
+    });
+
     it("backfills on stage entry when the issue already satisfies the gate", async () => {
       const company = await seedCompany();
       const pipeline = await seedIssueGatePipeline(company.id);

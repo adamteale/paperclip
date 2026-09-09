@@ -4120,6 +4120,46 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
     if (linked.length === 0) return { satisfied: false, linkedCount: 0 };
 
     if (input.rule.statuses && linked.some((row) => input.rule.statuses!.includes(row.status))) {
+      // CI-GATE GUARD (added 2026-09-09, DAI-326): a `statuses`-only rule is
+      // otherwise CI-oblivious — it only checks whether a linked issue's
+      // status is back to (e.g.) `in_review`, which an agent can set without
+      // any new commit or CI run. Observed live: DAI-326's PR failed CI
+      // (Storybook tests), the CI-failure webhook correctly bounced the case
+      // to `implement`, but the re-dispatched Coder run pushed no new commit
+      // — it just re-ran the "open PR" flow idempotently and flipped the
+      // issue back to `in_review`. This generic gate has no concept of CI at
+      // all, so the case sailed straight through `ci_gate` into `qa_review`
+      // with the SAME failing commit still failing on GitHub.
+      //
+      // The webhook-driven mechanism (`driveCiGateFromWorkflowRun`, in the
+      // paperclip-company-defaults plugin) IS CI-aware, but it is not the
+      // only thing evaluating a `ci_gate` stage — this generic gate (entry
+      // check + the periodic sweep) runs independently and will fire on
+      // stale/status-only grounds regardless. That webhook path also proved
+      // unreliable under load in practice (RPC timeouts processing a burst of
+      // GitHub webhook deliveries — observed 2026-09-09), so this generic
+      // gate can't simply be disabled for `ci_gate` either: it is this
+      // pipeline's only fallback for a genuine CI pass whose webhook delivery
+      // got dropped.
+      //
+      // Narrow fix: for a stage literally keyed `ci_gate`, consult the last
+      // CI outcome the webhook handler recorded on this case
+      // (`fields.ciStatus`, stamped by paperclip-company-defaults on every
+      // workflow_run completion, success or failure) and refuse to advance
+      // while the most recently recorded outcome is a failure. Any other
+      // stage, or a case with no CI signal recorded at all (e.g. no CI
+      // wired up), is unaffected — this only closes the specific hole above.
+      if (input.stage?.key === "ci_gate") {
+        const [caseRow] = await tx
+          .select({ fields: pipelineCases.fields })
+          .from(pipelineCases)
+          .where(and(eq(pipelineCases.companyId, input.companyId), eq(pipelineCases.id, input.caseId)))
+          .limit(1);
+        const ciStatus = (caseRow?.fields as Record<string, unknown> | undefined)?.ciStatus;
+        if (ciStatus === "failure") {
+          return { satisfied: false, linkedCount: linked.length };
+        }
+      }
       return { satisfied: true, linkedCount: linked.length };
     }
 
