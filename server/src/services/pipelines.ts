@@ -4157,8 +4157,26 @@ export function pipelineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeu
       // `>=` (not `>`) is required: the stage-entry event and the review-gate
       // interaction that `handleRequireApprovalStageEntry` creates are written
       // in the SAME transaction, so both rows carry the identical `now()`.
+      //
+      // GRACE WINDOW (added 2026-09-09, DAI-321/DAI-324): the "Ready to merge"
+      // interaction used by qa_review→pr_review is NOT created by that atomic
+      // requireApproval hook — it is created by the agent's own routine while
+      // still in the PRECEDING stage ("post the interaction, confirm it's
+      // pending, THEN transition to pr_review"), which is two separate API
+      // calls. That means this interaction's createdAt is *always* strictly
+      // earlier than the pr_review stage-entry event — by seconds in practice
+      // (observed 43s on DAI-324, 70s on DAI-321) — so a bare `>=` against
+      // stageEnteredAt rejected every single one of them and permanently
+      // stalled the case at pr_review even after a human accepted. A fixed
+      // grace window lets same-round, agent-driven create-then-transition
+      // sequences count, while still rejecting genuinely stale confirmations
+      // like the DAI-180 incident above (accepted interactions from 4-5 DAYS
+      // before the comment that wrongly closed the ticket) — nowhere close to
+      // this window.
+      const INTERACTION_STAGE_ENTRY_GRACE_MS = 15 * 60 * 1000; // 15 minutes
       const hasAccepted = interactions.some((row) =>
-        row.status === "accepted" && row.createdAt.getTime() >= stageEnteredAt.getTime()
+        row.status === "accepted" &&
+        row.createdAt.getTime() >= stageEnteredAt.getTime() - INTERACTION_STAGE_ENTRY_GRACE_MS
       );
       // `hasPending` stays unscoped on purpose — an older pending card is
       // still an unanswered question and must keep blocking the gate.

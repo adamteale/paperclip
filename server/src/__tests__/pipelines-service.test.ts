@@ -2450,6 +2450,48 @@ describeEmbeddedPostgres("pipelineService", () => {
       expect(await stageKeyOfCase(created.case.id)).toBe("done");
     });
 
+    // Regression test for the DAI-321/DAI-324 stall (2026-09-09): the
+    // "Ready to merge" interaction used by qa_review→pr_review is created by
+    // the agent's own routine BEFORE it calls the transition endpoint — two
+    // separate API calls, not one atomic write — so the interaction's
+    // createdAt is always a little earlier than the stage-entry event it's
+    // meant to satisfy. A bare `createdAt >= stageEnteredAt` rejected every
+    // one of these (observed gaps: 43s on DAI-324, 70s on DAI-321) and
+    // stranded both cases at pr_review indefinitely even after a human
+    // accepted. The grace window fixes this without reopening the DAI-180
+    // hole (see the "stale" test above, at 5 days old — far outside the
+    // window).
+    it("satisfies an interactionAccepted gate when the interaction was created shortly before this stage entry (agent-driven create-then-transition)", async () => {
+      const { company, created, issue } = await seedCaseAtReviewStage("pre-entry-grace-window-gate");
+
+      await db.insert(issueThreadInteractions).values({
+        companyId: company.id,
+        issueId: issue.id,
+        kind: "request_confirmation",
+        status: "accepted",
+        continuationPolicy: "none",
+        createdAt: new Date(Date.now() - 60 * 1000),
+        payload: { version: 1, prompt: "Ready to merge?" },
+      });
+
+      // Unlike the "during the current stage" test above (where the
+      // interaction is inserted AFTER entry, so nothing satisfies the gate
+      // until an explicit sweep), here the interaction already exists and is
+      // within the grace window the moment the case enters "review" — so
+      // entry-time evaluation cascades straight through to "done" without
+      // needing a separate sweep call. That immediate cascade is exactly the
+      // fix: DAI-321/DAI-324 never got a second chance because nothing ever
+      // re-evaluated the gate afterwards either.
+      await svc.transitionCase({
+        companyId: company.id,
+        caseId: created.case.id,
+        toStageKey: "review",
+        expectedVersion: created.case.version,
+        actor: userActor,
+      });
+      expect(await stageKeyOfCase(created.case.id)).toBe("done");
+    });
+
     it("does not advance when a human comment supersedes this round's pending confirmation", async () => {
       const { company, created, issue } = await seedCaseAtReviewStage("comment-supersede-gate");
 
