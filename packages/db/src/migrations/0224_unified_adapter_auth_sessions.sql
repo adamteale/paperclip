@@ -13,6 +13,6 @@
 DELETE FROM "adapter_auth_sessions";--> statement-breakpoint
 ALTER TABLE "adapter_auth_sessions" ADD COLUMN "public_session_id" varchar(128) NOT NULL;--> statement-breakpoint
 ALTER TABLE "adapter_auth_sessions" ADD COLUMN "bound_at" timestamp with time zone;--> statement-breakpoint
-DROP INDEX "adapter_auth_sessions_company_adapter_active_uq";--> statement-breakpoint
+DROP INDEX IF EXISTS "adapter_auth_sessions_company_adapter_active_uq";--> statement-breakpoint
 CREATE UNIQUE INDEX "adapter_auth_sessions_company_owner_adapter_active_uq" ON "adapter_auth_sessions" USING btree ("company_id","started_by_user_id","adapter_type") WHERE "adapter_auth_sessions"."status" IN ('starting', 'waiting_for_user', 'promoting', 'awaiting_code', 'submitting');--> statement-breakpoint
 CREATE UNIQUE INDEX "adapter_auth_sessions_public_session_id_uq" ON "adapter_auth_sessions" USING btree ("public_session_id");

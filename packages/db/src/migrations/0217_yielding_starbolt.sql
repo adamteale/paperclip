@@ -1,16 +1,16 @@
-ALTER TABLE "cost_events" DROP CONSTRAINT "cost_events_issue_id_issues_id_fk";
+ALTER TABLE "cost_events" DROP CONSTRAINT IF EXISTS "cost_events_issue_id_issues_id_fk";
 --> statement-breakpoint
-ALTER TABLE "feedback_votes" DROP CONSTRAINT "feedback_votes_issue_id_issues_id_fk";
+ALTER TABLE "feedback_votes" DROP CONSTRAINT IF EXISTS "feedback_votes_issue_id_issues_id_fk";
 --> statement-breakpoint
-ALTER TABLE "finance_events" DROP CONSTRAINT "finance_events_issue_id_issues_id_fk";
+ALTER TABLE "finance_events" DROP CONSTRAINT IF EXISTS "finance_events_issue_id_issues_id_fk";
 --> statement-breakpoint
-ALTER TABLE "issue_comments" DROP CONSTRAINT "issue_comments_issue_id_issues_id_fk";
+ALTER TABLE "issue_comments" DROP CONSTRAINT IF EXISTS "issue_comments_issue_id_issues_id_fk";
 --> statement-breakpoint
-ALTER TABLE "issue_inbox_archives" DROP CONSTRAINT "issue_inbox_archives_issue_id_issues_id_fk";
+ALTER TABLE "issue_inbox_archives" DROP CONSTRAINT IF EXISTS "issue_inbox_archives_issue_id_issues_id_fk";
 --> statement-breakpoint
-ALTER TABLE "issue_read_states" DROP CONSTRAINT "issue_read_states_issue_id_issues_id_fk";
+ALTER TABLE "issue_read_states" DROP CONSTRAINT IF EXISTS "issue_read_states_issue_id_issues_id_fk";
 --> statement-breakpoint
-ALTER TABLE "issue_thread_interactions" DROP CONSTRAINT "issue_thread_interactions_issue_id_issues_id_fk";
+ALTER TABLE "issue_thread_interactions" DROP CONSTRAINT IF EXISTS "issue_thread_interactions_issue_id_issues_id_fk";
 --> statement-breakpoint
 ALTER TABLE "cost_events" ADD CONSTRAINT "cost_events_issue_id_issues_id_fk" FOREIGN KEY ("issue_id") REFERENCES "public"."issues"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "feedback_votes" ADD CONSTRAINT "feedback_votes_issue_id_issues_id_fk" FOREIGN KEY ("issue_id") REFERENCES "public"."issues"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint

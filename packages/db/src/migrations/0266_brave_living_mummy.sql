@@ -42,7 +42,7 @@ CREATE TABLE "chat_teams_file_transfers" (
 	CONSTRAINT "chat_teams_file_transfers_attempt_check" CHECK (("chat_teams_file_transfers"."attempt_id" is null) = ("chat_teams_file_transfers"."attempt_expires_at" is null))
 );
 --> statement-breakpoint
-ALTER TABLE "chat_publications" DROP CONSTRAINT "chat_publications_state_check";--> statement-breakpoint
+ALTER TABLE "chat_publications" DROP CONSTRAINT IF EXISTS "chat_publications_state_check";--> statement-breakpoint
 CREATE UNIQUE INDEX "chat_publications_company_id_uq" ON "chat_publications" USING btree ("company_id","id");--> statement-breakpoint
 ALTER TABLE "chat_teams_file_transfers" ADD CONSTRAINT "chat_teams_file_transfers_company_id_companies_id_fk" FOREIGN KEY ("company_id") REFERENCES "public"."companies"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "chat_teams_file_transfers" ADD CONSTRAINT "chat_teams_file_transfers_issue_id_issues_id_fk" FOREIGN KEY ("issue_id") REFERENCES "public"."issues"("id") ON DELETE restrict ON UPDATE no action;--> statement-breakpoint

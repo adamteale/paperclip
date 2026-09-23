@@ -1,8 +1,8 @@
-ALTER TABLE "chat_conversations" DROP CONSTRAINT "chat_conversations_company_resource_fk";
+ALTER TABLE "chat_conversations" DROP CONSTRAINT IF EXISTS "chat_conversations_company_resource_fk";
 --> statement-breakpoint
-ALTER TABLE "chat_deliveries" DROP CONSTRAINT "chat_deliveries_company_conversation_fk";
+ALTER TABLE "chat_deliveries" DROP CONSTRAINT IF EXISTS "chat_deliveries_company_conversation_fk";
 --> statement-breakpoint
-ALTER TABLE "chat_deliveries" DROP CONSTRAINT "chat_deliveries_company_principal_fk";
+ALTER TABLE "chat_deliveries" DROP CONSTRAINT IF EXISTS "chat_deliveries_company_principal_fk";
 --> statement-breakpoint
 ALTER TABLE "chat_conversations" ADD CONSTRAINT "chat_conversations_resource_id_chat_endpoint_resources_id_fk" FOREIGN KEY ("resource_id") REFERENCES "public"."chat_endpoint_resources"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "chat_conversations" ADD CONSTRAINT "chat_conversations_company_resource_fk" FOREIGN KEY ("company_id","resource_id") REFERENCES "public"."chat_endpoint_resources"("company_id","id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
