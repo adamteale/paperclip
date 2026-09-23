@@ -1,6 +1,6 @@
-import { and, eq, notInArray } from "drizzle-orm";
+import { and, eq, inArray, notInArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, companyMemberships, principalPermissionGrants } from "@paperclipai/db";
+import { agents, companies, companyMemberships, principalPermissionGrants } from "@paperclipai/db";
 import type { PermissionKey, PrincipalType } from "@paperclipai/shared";
 import { grantsForHumanRole, normalizeHumanRole } from "./company-member-roles.js";
 
@@ -128,6 +128,13 @@ export async function backfillPrincipalAccessCompatibility(
       and(
         eq(companyMemberships.principalType, "user"),
         eq(companyMemberships.status, "active"),
+        // Orphaned memberships for hard-deleted companies must be skipped:
+        // inserting grants for a missing company violates the grants FK and
+        // would crash server startup (seen on ASUS after company cleanup).
+        inArray(
+          companyMemberships.companyId,
+          db.select({ id: companies.id }).from(companies),
+        ),
       ),
     );
 
