@@ -1,3 +1,11 @@
+DELETE FROM "cost_events" WHERE "issue_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "issues" i WHERE i."id" = "cost_events"."issue_id");
+DELETE FROM "feedback_votes" WHERE "issue_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "issues" i WHERE i."id" = "feedback_votes"."issue_id");
+DELETE FROM "finance_events" WHERE "issue_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "issues" i WHERE i."id" = "finance_events"."issue_id");
+DELETE FROM "issue_comments" WHERE "issue_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "issues" i WHERE i."id" = "issue_comments"."issue_id");
+DELETE FROM "issue_inbox_archives" WHERE "issue_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "issues" i WHERE i."id" = "issue_inbox_archives"."issue_id");
+DELETE FROM "issue_read_states" WHERE "issue_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "issues" i WHERE i."id" = "issue_read_states"."issue_id");
+DELETE FROM "issue_thread_interactions" WHERE "issue_id" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "issues" i WHERE i."id" = "issue_thread_interactions"."issue_id");
+--> statement-breakpoint
 ALTER TABLE "cost_events" DROP CONSTRAINT IF EXISTS "cost_events_issue_id_issues_id_fk";
 --> statement-breakpoint
 ALTER TABLE "feedback_votes" DROP CONSTRAINT IF EXISTS "feedback_votes_issue_id_issues_id_fk";
