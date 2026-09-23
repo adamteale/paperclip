@@ -223,6 +223,8 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
   const parsed = instanceExperimentalSettingsStorageSchema.safeParse(raw ?? {});
   if (parsed.success) {
     return {
+      enableIssueGraphLivenessAutoRecovery: parsed.data.enableIssueGraphLivenessAutoRecovery ?? false,
+      issueGraphLivenessAutoRecoveryLookbackHours: parsed.data.issueGraphLivenessAutoRecoveryLookbackHours ?? 24,
       enableEnvironments: parsed.data.enableEnvironments ?? false,
       enableNativeRunner: parsed.data.enableNativeRunner ?? true,
       enableManagedSandboxOnly: parsed.data.enableManagedSandboxOnly ?? false,
@@ -266,6 +268,8 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
     };
   }
   return {
+    enableIssueGraphLivenessAutoRecovery: false,
+    issueGraphLivenessAutoRecoveryLookbackHours: 24,
     enableEnvironments: false,
     enableNativeRunner: true,
     enableManagedSandboxOnly: false,

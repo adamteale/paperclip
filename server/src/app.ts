@@ -847,6 +847,16 @@ export async function createApp(
       deploymentExposure: opts.deploymentExposure,
     }),
   );
+  const jobCoordinator = createPluginJobCoordinator({
+    db,
+    lifecycle,
+    scheduler,
+    jobStore,
+  });
+  const hostServiceCleanup = createPluginHostServiceCleanup(
+    lifecycle,
+    hostServicesDisposers,
+  );
   let viteHtmlRenderer: ReturnType<typeof createCachedViteHtmlRenderer> | null =
     null;
   let viteDevServer: { close(): Promise<void> } | null = null;

@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
-  issueThreadInteractions,
   activityLog,
   agents,
   companies,
@@ -17,7 +16,6 @@ import {
   pipelineCaseBlockers,
   pipelineCaseIssueLinks,
   pipelineCaseEvents,
-  pipelineAutomationExecutions,
   pipelineCases,
   pipelineStages,
   pipelineTransitions,

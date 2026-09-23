@@ -24,6 +24,7 @@ import {
   blockersSchema,
   issueLinkRoleSchema,
   createIssueLinkSchema,
+  createCaseLinkSchema,
   bulkReviewSchema,
   upsertPipelineDocumentSchema,
   upsertPipelineCaseDocumentSchema,

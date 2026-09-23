@@ -263,6 +263,14 @@ export const INSTANCE_FEATURE_CATALOG: Record<InstanceFeatureKey, FeatureCatalog
     cloudDefault: false,
     selfHostedDefault: false,
   },
+  enableIssueGraphLivenessAutoRecovery: {
+    title: "Auto-Create Recovery Tasks",
+    description:
+      "Let the heartbeat scheduler create recovery tasks for task dependency chains found inside the configured lookback window.",
+    tier: "managed",
+    cloudDefault: false,
+    selfHostedDefault: false,
+  },
   enableWorkspaceBranchReconcileForward: {
     title: "Workspace Branch Reconcile Forward",
     description:

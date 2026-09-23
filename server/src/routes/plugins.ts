@@ -1048,7 +1048,7 @@ export function pluginRoutes(
       // instead of rejecting a call the agent itself has enough context to
       // make correctly.
       try {
-        const targetIssue = await issueService.getById(
+        const targetIssue = await issuesSvc.getById(
           (parameters as Record<string, unknown>).issueId as string,
         );
         if (targetIssue?.projectId) {
