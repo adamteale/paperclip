@@ -4625,13 +4625,49 @@ export async function runChildProcess(
         for (const [key, value] of Object.entries(childEnv)) {
           if (value === undefined) delete childEnv[key];
         }
-        const child = spawn(target.command, target.args, {
-          cwd: target.cwd ?? opts.cwd,
-          env: childEnv,
-          detached: process.platform !== "win32",
-          shell: false,
-          stdio: [opts.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
-        }) as ChildProcessWithEvents;
+        let child: ChildProcessWithEvents;
+        try {
+          child = spawn(target.command, target.args, {
+            cwd: target.cwd ?? opts.cwd,
+            env: childEnv,
+            detached: process.platform !== "win32",
+            shell: false,
+            stdio: [opts.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
+          }) as ChildProcessWithEvents;
+        } catch (err) {
+          const e = err as NodeJS.ErrnoException;
+          if (e?.code === "E2BIG") {
+            // Diagnostic (2026-09-24, DAI wave stall): argv+env look small by
+            // audit, yet execve fails E2BIG for some runs. Log exact sizes so
+            // the offending payload is identifiable instead of guessable.
+            let envTotal = 0;
+            let maxEnvKey = "";
+            let maxEnvValue = 0;
+            for (const [k, v] of Object.entries(childEnv)) {
+              const len = k.length + (v?.length ?? 0);
+              envTotal += len + 2;
+              if (len > maxEnvValue) {
+                maxEnvValue = len;
+                maxEnvKey = k;
+              }
+            }
+            console.error(
+              `[e2big-diagnostic] ${JSON.stringify({
+                runId,
+                command: target.command,
+                argCount: target.args.length,
+                argLengths: target.args.map((a) => (a ?? "").length),
+                argTotal: target.args.reduce((n, a) => n + (a?.length ?? 0) + 1, 0),
+                envVars: Object.keys(childEnv).length,
+                envTotal,
+                maxEnvKey,
+                maxEnvValue,
+                stdinLength: opts.stdin?.length ?? 0,
+              })}`,
+            );
+          }
+          throw err;
+        }
         const startedAt = new Date().toISOString();
         const processGroupId = resolveProcessGroupId(child);
 
