@@ -20,6 +20,75 @@ const object = (v: unknown): Record<string, unknown> =>
     : {};
 const string = (v: unknown) =>
   typeof v === "string" && v.length > 0 ? v : null;
+
+// ── Bounded message history (2026-09-24, DAI wave) ────────────────────────
+// The envelope's `messages` array carries the FULL body of every comment on
+// the issue. On long-running tickets that accumulates past the kernel's
+// 128KB MAX_ARG_STRLEN when the wake payload is serialized into the child
+// env (see pi-local execute.ts), and it multiplies every turn's input tokens
+// (~230K+ tokens of re-read history per run measured on DF-247/248/249).
+//
+// Deterministic bounding: the most recent messages keep full bodies (the
+// latest directive/verdict is the working context); older bodies are capped
+// with a pointer to the full text, which lives on the ticket itself. Same
+// inputs → same truncation, so the resumeDelta dedup comparison against the
+// prior run's envelope stays consistent.
+const CONTINUATION_MAX_CHARS = Number(
+  process.env.PAPERCLIP_EXECUTION_CONTINUATION_MAX_CHARS ?? 96_000,
+);
+const CONTINUATION_OLD_BODY_CAP = 2_000;
+const CONTINUATION_KEEP_RECENT_FULL = 6;
+const CONTINUATION_LAST_BODY_HARD_CAP = 16_000;
+
+function boundContinuationMessages<T extends { body: string; id: string }>(
+  messages: T[],
+): { messages: T[]; truncatedCount: number } {
+  const bodies = messages.map((m) => m.body ?? "");
+  const total = bodies.reduce((n, b) => n + b.length, 0);
+  if (total <= CONTINUATION_MAX_CHARS || messages.length === 0) {
+    return { messages, truncatedCount: 0 };
+  }
+  const out = messages.map((m, i) => ({ ...m }));
+  const keepFullFrom = Math.max(0, messages.length - CONTINUATION_KEEP_RECENT_FULL);
+  let budget =
+    CONTINUATION_MAX_CHARS -
+    out
+      .slice(keepFullFrom)
+      .reduce((n, m) => n + (m.body?.length ?? 0), 0);
+  let truncatedCount = 0;
+  for (let i = 0; i < keepFullFrom; i++) {
+    budget -= out[i].body?.length ?? 0;
+    if (budget < 0 && (out[i].body?.length ?? 0) > CONTINUATION_OLD_BODY_CAP) {
+      out[i].body =
+        out[i].body.slice(0, CONTINUATION_OLD_BODY_CAP) +
+        `\n
+[truncated — full text: comment ${out[i].id} on this ticket]`;
+      truncatedCount++;
+      budget += CONTINUATION_OLD_BODY_CAP;
+    }
+  }
+  // Hard cap even the kept-recent bodies (oldest first), except the very last
+  // message which only yields to a larger emergency cap — the freshest
+  // directive/verdict is the working context and must stay readable.
+  for (let i = keepFullFrom; i < out.length - 1; i++) {
+    if ((out[i].body?.length ?? 0) > CONTINUATION_OLD_BODY_CAP) {
+      out[i].body =
+        out[i].body.slice(0, CONTINUATION_OLD_BODY_CAP) +
+        `\n
+[truncated — full text: comment ${out[i].id} on this ticket]`;
+      truncatedCount++;
+    }
+  }
+  const last = out[out.length - 1];
+  if ((last.body?.length ?? 0) > CONTINUATION_LAST_BODY_HARD_CAP) {
+    last.body =
+      last.body.slice(0, CONTINUATION_LAST_BODY_HARD_CAP) +
+      `\n
+[truncated — full text: comment ${last.id} on this ticket]`;
+    truncatedCount++;
+  }
+  return { messages: out, truncatedCount };
+}
 export function continuationOriginCommentIds(context: unknown): string[] {
   const c = object(context);
   const prior = object(c.executionContinuation);
@@ -173,6 +242,7 @@ export async function buildExecutionContinuation(input: {
       sourceTrust: row.sourceTrust,
     };
   });
+  const bounded = boundContinuationMessages(messages);
   const previousRun = input.previousContextRunId
     ? (
         await db
@@ -196,7 +266,7 @@ export async function buildExecutionContinuation(input: {
     deliveredMessages && input.previousContextRunId
       ? {
           baseRunId: input.previousContextRunId,
-          messages: messages.filter(
+          messages: bounded.messages.filter(
             (message) =>
               originCommentIds.includes(message.id) ||
               !deliveredMessages.some(
@@ -213,7 +283,7 @@ export async function buildExecutionContinuation(input: {
           ),
         }
       : undefined;
-  const latestRequest = messages.findLast(
+  const latestRequest = bounded.messages.findLast(
     (row) =>
       row.authorType === "user" && !row.createdByRunId && !row.deleted && row.body.trim().length > 0,
   );
@@ -317,6 +387,15 @@ export async function buildExecutionContinuation(input: {
   return {
     ...(interruptedRunId ? { interruptedRunId } : {}),
     ...(resumeDelta ? { resumeDelta } : {}),
+    ...(bounded.truncatedCount > 0
+      ? {
+          truncation: {
+            truncatedMessages: bounded.truncatedCount,
+            maxChars: CONTINUATION_MAX_CHARS,
+            note: "older comment bodies capped; full text on the ticket",
+          },
+        }
+      : {}),
     recoveryOutcomes: reconciliations
       .filter((row) => row.evidence.executionReconciliation)
       .map((row) => ({
@@ -332,8 +411,11 @@ export async function buildExecutionContinuation(input: {
       sourceRunId,
     },
     originCommentIds,
-    objective: latestRequest?.body ?? issue.description ?? issue.title,
-    messages,
+    objective: (latestRequest?.body ?? issue.description ?? issue.title)?.slice(
+      0,
+      8_000,
+    ),
+    messages: bounded.messages,
     interactionOutcomes: interactions
       .filter((row) => row.status !== "pending")
       .map((row) => ({
@@ -353,8 +435,8 @@ export async function buildExecutionContinuation(input: {
       .filter((row) => row.status === "pending")
       .map((row) => row.id),
     coverage: {
-      kind: "full_task_history",
-      throughCommentId: messages.at(-1)?.id ?? null,
+      kind: bounded.truncatedCount > 0 ? "bounded_task_history" : "full_task_history",
+      throughCommentId: bounded.messages.at(-1)?.id ?? null,
       summaryThroughCommentId: null,
     },
   };
