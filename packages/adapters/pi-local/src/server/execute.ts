@@ -48,7 +48,6 @@ import {
   renderPaperclipWakePrompt,
   selectPaperclipTaskMarkdown,
   isPaperclipRecoveryWakePayload,
-  stringifyPaperclipWakePayload,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   DEFAULT_PAPERCLIP_CONVERSATION_PROMPT_TEMPLATE,
   runChildProcess,
@@ -376,7 +375,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const linkedIssueIds = Array.isArray(context.issueIds)
     ? context.issueIds.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
     : [];
-  const wakePayloadJson = stringifyPaperclipWakePayload(context.paperclipWake);
   const issueWorkMode = readPaperclipIssueWorkModeFromContext(context);
     
   if (wakeTaskId) env.PAPERCLIP_TASK_ID = wakeTaskId;
@@ -386,7 +384,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (approvalId) env.PAPERCLIP_APPROVAL_ID = approvalId;
   if (approvalStatus) env.PAPERCLIP_APPROVAL_STATUS = approvalStatus;
   if (linkedIssueIds.length > 0) env.PAPERCLIP_LINKED_ISSUE_IDS = linkedIssueIds.join(",");
-  if (wakePayloadJson) env.PAPERCLIP_WAKE_PAYLOAD_JSON = wakePayloadJson;
+  // PAPERCLIP_WAKE_PAYLOAD_JSON is deliberately NOT set on pi_local (2026-09-24,
+  // DAI Component-wave stall): the wake payload for long-running tickets grows
+  // past the kernel's 128KB MAX_ARG_STRLEN per-string limit (measured 154KB on
+  // DF-247/248/249), and execve then fails with E2BIG before the agent ever
+  // starts — QA/Coder dispatches died in fast retry loops while the same
+  // service spawned Architect runs fine (their payloads were smaller). Nothing
+  // in the pi path reads the variable — the wake content is delivered via the
+  // stdin prompt (renderPaperclipWakePrompt → userPrompt) — so the env copy is
+  // dead weight with a hard failure ceiling. Reintroduce only via a file or
+  // chunked transport if a consumer ever appears.
   refreshPaperclipWorkspaceEnvForExecution({
     env,
     envConfig,
