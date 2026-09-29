@@ -812,6 +812,75 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
       },
       15_000,
     );
+
+    it("defers a due retry while the agent is not invokable, then promotes after recovery", async () => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+      const issueId = randomUUID();
+      const runId = randomUUID();
+      const now = new Date();
+      await seedIssue({ companyId, issueId, status: "in_progress", assigneeAgentId: agentId });
+      await seedScheduledRetryRun({ runId, companyId, agentId, issueId, now });
+      await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issueId));
+      await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+
+      const adapter = createPostgresRunDispatchAdapter(db);
+      const outcome = await adapter.promoteOrCancelDueRetry({ runId, companyId, now });
+
+      expect(outcome.outcome).toBe("gate_deferred");
+      if (outcome.outcome === "gate_deferred") {
+        expect(outcome.errorCode).toBe("agent_not_invokable");
+        expect(outcome.dueAt.getTime()).toBeGreaterThan(now.getTime());
+      }
+      const [row] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+      expect(row?.status).toBe("scheduled_retry");
+      expect(row?.scheduledRetryAt && new Date(row.scheduledRetryAt).getTime() > now.getTime()).toBe(true);
+      // The issue keeps its execution lock — the deferred retry still owns the work.
+      const [issueRow] = await db
+        .select({ executionRunId: issues.executionRunId })
+        .from(issues)
+        .where(eq(issues.id, issueId));
+      expect(issueRow?.executionRunId).toBe(runId);
+
+      // Agent recovers: the deferred retry promotes on its next due moment.
+      await db.update(agents).set({ status: "active" }).where(eq(agents.id, agentId));
+      const recoveredNow = new Date(new Date(row!.scheduledRetryAt!).getTime() + 1);
+      const promoted = await adapter.promoteOrCancelDueRetry({ runId, companyId, now: recoveredNow });
+      expect(promoted.outcome).toBe("promoted");
+    });
+
+    it("cancels a due retry suppressed by a non-invokable agent once the deferral window is exhausted", async () => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+      const issueId = randomUUID();
+      const runId = randomUUID();
+      const createdAt = new Date(Date.now() - 25 * 60 * 60_000);
+      const now = new Date();
+      await seedIssue({ companyId, issueId, status: "in_progress", assigneeAgentId: agentId });
+      await db.insert(heartbeatRuns).values({
+        id: runId,
+        companyId,
+        agentId,
+        invocationSource: "retry",
+        status: "scheduled_retry",
+        scheduledRetryAttempt: 1,
+        scheduledRetryAt: now,
+        scheduledRetryReason: "max_turns_continuation",
+        contextSnapshot: { issueId },
+        updatedAt: createdAt,
+        createdAt,
+      });
+      await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issueId));
+      await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+
+      const adapter = createPostgresRunDispatchAdapter(db);
+      const outcome = await adapter.promoteOrCancelDueRetry({ runId, companyId, now });
+
+      expect(outcome.outcome).toBe("gate_suppressed");
+      if (outcome.outcome === "gate_suppressed") {
+        expect(outcome.errorCode).toBe("agent_not_invokable");
+      }
+      const [row] = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+      expect(row?.status).toBe("cancelled");
+    });
   });
   it.each(["active", "resolved"])("blocks a generic retry after %s no-replay disposition", async status => {
     const { companyId, agentId } = await seedCompanyAndAgent();

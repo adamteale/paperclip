@@ -631,6 +631,91 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     expect(promotedRun?.status).toBe("queued");
   });
 
+  it("schedules a bounded transient retry even while the agent is not invokable; the promote gate defers it", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const sourceRunId = randomUUID();
+    const now = new Date("2026-04-20T12:00:00.000Z");
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+      defaultResponsibleUserId: "responsible-user",
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "CodexCoder",
+      role: "engineer",
+      status: "paused",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {
+        heartbeat: {
+          wakeOnDemand: true,
+          maxConcurrentRuns: 1,
+        },
+      },
+      permissions: {},
+    });
+
+    await db.insert(heartbeatRuns).values({
+      id: sourceRunId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      status: "failed",
+      error: "upstream overload",
+      errorCode: "adapter_failed",
+      resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } },
+      finishedAt: now,
+      contextSnapshot: {
+        issueId: randomUUID(),
+        wakeReason: "issue_assigned",
+      },
+      updatedAt: now,
+      createdAt: now,
+    });
+
+    const scheduled = await heartbeat.scheduleBoundedRetry(sourceRunId, {
+      now,
+      random: () => 0.5,
+    });
+
+    // A down agent must not silently swallow the retry: it schedules and the
+    // promote-time gate defers it until the agent is invokable again.
+    expect(scheduled.outcome).toBe("scheduled");
+    if (scheduled.outcome !== "scheduled") return;
+
+    const adapter = createPostgresRunDispatchAdapter(db);
+    const promotion = await adapter.promoteOrCancelDueRetry({
+      companyId,
+      runId: scheduled.run.id,
+      now: scheduled.dueAt,
+    });
+    expect(promotion.outcome).toBe("gate_deferred");
+    if (promotion.outcome === "gate_deferred") {
+      expect(promotion.errorCode).toBe("agent_not_invokable");
+    }
+
+    const deferredRun = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, scheduled.run.id))
+      .then((rows) => rows[0] ?? null);
+    expect(deferredRun?.status).toBe("scheduled_retry");
+    expect(deferredRun?.scheduledRetryAt && new Date(deferredRun.scheduledRetryAt).getTime() > scheduled.dueAt.getTime()).toBe(true);
+
+    // Recovery: the deferred retry promotes on its next due moment.
+    await db.update(agents).set({ status: "active" }).where(eq(agents.id, agentId));
+    const recoveredNow = new Date(new Date(deferredRun!.scheduledRetryAt!).getTime() + 1);
+    expect(await adapter.promoteOrCancelDueRetry({ companyId, runId: scheduled.run.id, now: recoveredNow }))
+      .toMatchObject({ outcome: "promoted" });
+  });
+
   it("schedules max-turn continuations with distinct retry metadata", async () => {
     const { runId, now } = await seedMaxTurnFixture();
 

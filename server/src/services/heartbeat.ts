@@ -15263,33 +15263,10 @@ export function heartbeatService(
         issueId: readNonEmptyString(run.contextSnapshot?.issueId),
       };
     }
-    if (retryReason !== MAX_TURN_CONTINUATION_RETRY_REASON) {
-      const invokability = await getAgentInvokability(agent);
-      if (!invokability.invokable) {
-        await appendRunEvent(run, {
-          eventType: "lifecycle",
-          stream: "system",
-          level: "warn",
-          message:
-            "Scheduled retry suppressed because the agent is not invokable",
-          payload: {
-            retryReason,
-            scheduledRetryAttempt: nextAttempt,
-            maxAttempts,
-            reason: invokability.reason,
-            invalidOrgChain: invokability.invalidOrgChain,
-            ...invokability.details,
-          },
-        });
-        return {
-          outcome: "not_scheduled" as const,
-          reason:
-            "Scheduled retry suppressed because the agent is not invokable",
-          errorCode: "agent_not_invokable" as const,
-          issueId,
-        };
-      }
-    }
+    // No schedule-time invokability gate: a retry scheduled while the agent
+    // is down sits in scheduled_retry and the promote-time gate
+    // (promoteOrCancelDueRetry) defers it until the agent is invokable again,
+    // so a temporary outage no longer silently drops the retry.
 
     const schedule =
       transientRetryNotBefore &&
@@ -16502,6 +16479,13 @@ export function heartbeatService(
       return {
         outcome: "promoted" as const,
         message: "Scheduled retry was promoted to the queued run pool",
+        scheduledRetry,
+      };
+    }
+    if (promotion.outcome === "gate_deferred") {
+      return {
+        outcome: "gate_deferred" as const,
+        message: promotion.reason,
         scheduledRetry,
       };
     }

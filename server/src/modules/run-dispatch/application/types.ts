@@ -42,6 +42,13 @@ export type PromoteScheduledRetryOutcome =
       reason: string;
       errorCode: ScheduledRetryGateErrorCode;
     }
+  | {
+      /** The retry stays scheduled_retry and will be re-evaluated at  (agent was not invokable). */
+      outcome: "gate_deferred";
+      reason: string;
+      errorCode: ScheduledRetryGateErrorCode;
+      dueAt: Date;
+    }
   | { outcome: "not_promoted" };
 
 export type CancelStaleQueuedRunOutcome =

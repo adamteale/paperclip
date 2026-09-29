@@ -700,6 +700,88 @@ export function createPostgresRunDispatchAdapter(
     return { applied: true, run: row };
   }
 
+  /** How far each invokability deferral pushes the next re-evaluation, and how long a retry stays parked before giving up. */
+  const AGENT_INVOKABILITY_DEFER_DELAY_MS = 5 * 60_000;
+  const AGENT_INVOKABILITY_DEFER_WINDOW_MS = 24 * 60 * 60_000;
+
+  type DeferSuppressedRetryInput = {
+    runId: string;
+    companyId: string;
+    now: Date;
+    reason: string;
+    issueId: string | null;
+    details: Record<string, unknown>;
+  };
+  type DeferSuppressedRetryResult =
+    | { kind: "deferred"; run: HeartbeatRun }
+    | { kind: "cancelled"; run: HeartbeatRun }
+    | { kind: "not_applied" };
+
+  /** Parks an agent-not-invokable-suppressed due retry for re-evaluation instead of cancelling it, so a temporarily down agent does not lose the work. */
+  async function deferSuppressedRetryInTx(
+    tx: Db,
+    input: DeferSuppressedRetryInput,
+  ): Promise<DeferSuppressedRetryResult> {
+    const suppressedNow = and(
+      eq(heartbeatRuns.id, input.runId),
+      eq(heartbeatRuns.companyId, input.companyId),
+      eq(heartbeatRuns.status, "scheduled_retry"),
+      lte(heartbeatRuns.scheduledRetryAt, input.now),
+    );
+    const [row] = await tx.select().from(heartbeatRuns).where(suppressedNow).limit(1);
+    if (!row) return { kind: "not_applied" };
+
+    // ponytail: flat 24h parking window from run creation; per-agent policy if outages outgrow it.
+    if (new Date(row.createdAt).getTime() + AGENT_INVOKABILITY_DEFER_WINDOW_MS <= input.now.getTime()) {
+      const cancelled = await cancelSuppressedRetryInTx(tx, {
+        runId: input.runId,
+        companyId: input.companyId,
+        now: input.now,
+        reason: `${input.reason}; retry parked ${AGENT_INVOKABILITY_DEFER_WINDOW_MS / 60_000}m without an invokable agent, giving up`,
+        errorCode: "agent_not_invokable",
+        issueId: input.issueId,
+        details: input.details,
+      });
+      return cancelled.applied ? { kind: "cancelled", run: cancelled.run } : { kind: "not_applied" };
+    }
+
+    const [updated] = await tx
+      .update(heartbeatRuns)
+      .set({
+        scheduledRetryAt: new Date(input.now.getTime() + AGENT_INVOKABILITY_DEFER_DELAY_MS),
+        error: input.reason,
+        errorCode: "agent_not_invokable",
+        updatedAt: input.now,
+      })
+      .where(suppressedNow)
+      .returning();
+    if (!updated) return { kind: "not_applied" };
+
+    // Log once per suppression episode, so a day-long outage writes one event, not one per sweep.
+    if (row.errorCode !== "agent_not_invokable") {
+      await appendHeartbeatRunEvent(tx as unknown as Db, {
+        companyId: row.companyId,
+        runId: row.id,
+        agentId: row.agentId,
+        eventType: "lifecycle",
+        stream: "system",
+        level: "warn",
+        message:
+          "Scheduled retry deferred: agent is not invokable; the retry will be re-evaluated when the agent recovers",
+        payload: {
+          ...input.details,
+          deferredUntil: new Date(updated.scheduledRetryAt!).toISOString(),
+          deferWindowExpiresAt: new Date(
+            new Date(row.createdAt).getTime() + AGENT_INVOKABILITY_DEFER_WINDOW_MS,
+          ).toISOString(),
+          scheduledRetryAttempt: row.scheduledRetryAttempt,
+          scheduledRetryReason: row.scheduledRetryReason,
+        },
+      });
+    }
+    return { kind: "deferred", run: updated };
+  }
+
   async function promoteOrCancelDueRetry(
     input: PromoteOrCancelDueRetryInput,
   ): Promise<PromoteScheduledRetryOutcome> {
@@ -764,6 +846,40 @@ export function createPostgresRunDispatchAdapter(
         factsResult.facts.retryReasonKind !== "native_safe_replacement";
 
       if (!gate.allowed && !isLegacyMissingIssueException) {
+        // A temporarily non-invokable agent must not cost the run its retry:
+        // park the due retry for re-evaluation instead of cancelling it.
+        if (gate.errorCode === "agent_not_invokable") {
+          const deferred = await deferSuppressedRetryInTx(tx as unknown as Db, {
+            runId: input.runId,
+            companyId: input.companyId,
+            now,
+            reason: gate.reason,
+            issueId: gate.issueId,
+            details: gate.details,
+          });
+          if (deferred.kind === "deferred") {
+            return {
+              outcome: {
+                outcome: "gate_deferred" as const,
+                reason: gate.reason,
+                errorCode: gate.errorCode,
+                dueAt: new Date(deferred.run.scheduledRetryAt!),
+              },
+              telemetryRun: deferred.run,
+            };
+          }
+          if (deferred.kind === "cancelled") {
+            return {
+              outcome: {
+                outcome: "gate_suppressed" as const,
+                reason: gate.reason,
+                errorCode: gate.errorCode,
+              },
+              telemetryRun: deferred.run,
+            };
+          }
+          return { outcome: { outcome: "not_promoted" as const }, telemetryRun: null };
+        }
         const cancelled = await cancelSuppressedRetryInTx(tx as unknown as Db, {
           runId: input.runId,
           companyId: input.companyId,
