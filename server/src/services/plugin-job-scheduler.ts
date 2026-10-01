@@ -235,6 +235,10 @@ export function createPluginJobScheduler(
 
   /** Guard against concurrent tick execution. */
   let tickInProgress = false;
+  // When the current tick started, so the skip log can say HOW LONG the stuck
+  // tick has been in progress (a tick that never finishes means one of its
+  // awaited calls never resolved — see the DB statement-timeout hardening).
+  let tickInProgressSince = 0;
 
   // -----------------------------------------------------------------------
   // Core: tick
@@ -246,11 +250,15 @@ export function createPluginJobScheduler(
   async function tick(): Promise<void> {
     // Prevent overlapping ticks (in case a tick takes longer than the interval)
     if (tickInProgress) {
-      log.debug("skipping tick — previous tick still in progress");
+      log.debug(
+        { inProgressMs: Date.now() - tickInProgressSince },
+        "skipping tick — previous tick still in progress",
+      );
       return;
     }
 
     tickInProgress = true;
+    tickInProgressSince = Date.now();
     tickCount++;
     lastTickAt = new Date();
 
@@ -329,6 +337,7 @@ export function createPluginJobScheduler(
       );
     } finally {
       tickInProgress = false;
+      tickInProgressSince = 0;
     }
   }
 
