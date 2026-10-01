@@ -52,6 +52,7 @@ export type SecretProviderClientErrorCode =
   | "conflict"
   | "invalid_request"
   | "provider_unavailable"
+  | "provider_timeout"
   | "provider_error";
 
 export interface SecretProviderClientErrorOptions {
@@ -71,6 +72,7 @@ const SECRET_PROVIDER_CLIENT_ERROR_STATUS: Record<SecretProviderClientErrorCode,
   conflict: 409,
   invalid_request: 422,
   provider_unavailable: 503,
+  provider_timeout: 504,
   provider_error: 502,
 };
 
