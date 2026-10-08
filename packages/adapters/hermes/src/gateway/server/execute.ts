@@ -8,8 +8,10 @@ import {
   asString,
   parseObject,
   readPaperclipIssueWorkModeFromContext,
-  renderPaperclipWakePrompt,
+  selectPaperclipPromptSections,
+  isPaperclipRecoveryWakePayload,
   stringifyPaperclipWakePayload,
+  paperclipWakeCommentsArePromptOwned,
 } from "@paperclipai/adapter-utils/server-utils";
 import {
   ADAPTER_TYPE,
@@ -20,6 +22,7 @@ import {
 } from "../shared/constants.js";
 import {
   allowsInsecureRemoteHttp,
+  isLoopbackHostname,
   isRemotePlainHttp,
   remotePlainHttpDeniedMessage,
 } from "./transport-security.js";
@@ -36,6 +39,7 @@ type HermesHttpError = Error & {
   code?: string;
   retryNotBefore?: string | null;
   body?: unknown;
+  transportCause?: unknown;
 };
 
 type TerminalState = {
@@ -262,9 +266,25 @@ function buildHeaders(input: {
 }
 
 function buildInput(ctx: AdapterExecutionContext, paperclipApiUrl: string | null): string {
-  const wakePrompt = renderPaperclipWakePrompt(ctx.context.paperclipWake);
-  const wakePayloadJson = stringifyPaperclipWakePayload(ctx.context.paperclipWake);
-  const taskMarkdown = nonEmpty(ctx.context.paperclipTaskMarkdown);
+  // Stable session keys (issue/agent strategy) resume the same remote Hermes
+  // conversation across runs; a stored session id from a prior run means that
+  // conversation already received the task brief, so pick the compact
+  // task-context variant under the shared resume rules.
+  const sessionKeyStrategy = normalizeSessionKeyStrategy(ctx.config.sessionKeyStrategy);
+  const resumedSession =
+    (sessionKeyStrategy === "issue" || sessionKeyStrategy === "agent") &&
+    Boolean(nonEmpty(ctx.runtime?.sessionId));
+  const { taskContextNote: taskMarkdown, wakePrompt } = selectPaperclipPromptSections(ctx.context, {
+    resumedSession,
+    // Hermes gateway owns the execution contract below; retain the old
+    // gateway prompt shape and avoid adding a second contract on resume.
+    includeExecutionContract: false,
+  });
+  const wakePayloadJson = paperclipWakeCommentsArePromptOwned(ctx.context)
+    ? null
+    : stringifyPaperclipWakePayload(ctx.context.paperclipWake, {
+        omitIssueDescription: Boolean(taskMarkdown),
+      });
   const sessionHandoff = nonEmpty(ctx.context.paperclipSessionHandoffMarkdown);
   const issueWorkMode = readPaperclipIssueWorkModeFromContext(ctx.context);
   const lines = [
@@ -277,12 +297,16 @@ function buildInput(ctx: AdapterExecutionContext, paperclipApiUrl: string | null
     ...(paperclipApiUrl ? [`- Paperclip API URL: ${paperclipApiUrl}`] : []),
     ...(issueWorkMode ? [`- Issue work mode: ${issueWorkMode}`] : []),
     "",
-    "Execution contract:",
-    "- Take concrete action in this run when the task is actionable.",
-    "- Do not stop at a plan unless the issue asks for planning only.",
-    "- Leave durable progress and update the issue to a clear final disposition.",
-    "- Use X-Paperclip-Run-Id on mutating Paperclip API requests when a Paperclip API key is available.",
-    "",
+    ...(ctx.context.conversationMode === true || isPaperclipRecoveryWakePayload(ctx.context.paperclipWake)
+      ? []
+      : [
+          "Execution contract:",
+          "- Take concrete action in this run when the task is actionable.",
+          "- Do not stop at a plan unless the issue asks for planning only.",
+          "- Leave durable progress and update the issue to a clear final disposition.",
+          "- Use X-Paperclip-Run-Id on mutating Paperclip API requests when a Paperclip API key is available.",
+          "",
+        ]),
     wakePrompt,
     ...(sessionHandoff ? ["", sessionHandoff] : []),
     ...(taskMarkdown ? ["", taskMarkdown] : []),
@@ -302,7 +326,10 @@ function buildInput(ctx: AdapterExecutionContext, paperclipApiUrl: string | null
 function buildRunBody(ctx: AdapterExecutionContext, sessionKey: string | null): Record<string, unknown> {
   const paperclipApiUrl = nonEmpty(ctx.config.paperclipApiUrl);
   const payloadTemplate = parseObject(ctx.config.payloadTemplate);
-  const input = nonEmpty(payloadTemplate.input) ?? buildInput(ctx, paperclipApiUrl);
+  const configuredInput = nonEmpty(payloadTemplate.input);
+  const input = configuredInput && ctx.context.conversationMode === true
+    ? `${configuredInput}\n\n${buildInput(ctx, paperclipApiUrl)}`
+    : configuredInput ?? buildInput(ctx, paperclipApiUrl);
   const instructions =
     nonEmpty(ctx.config.instructions) ??
     nonEmpty(payloadTemplate.instructions) ??
@@ -352,6 +379,7 @@ async function fetchJson(input: RequestInfo | URL, init: RequestInit): Promise<u
   } catch (err) {
     const fetchErr = new Error(`Hermes gateway request failed: ${fetchFailureMessage(err)}`) as HermesHttpError;
     fetchErr.code = "hermes_gateway_connect_failed";
+    fetchErr.transportCause = err instanceof Error ? err.cause : undefined;
     throw fetchErr;
   }
   const body = await readResponseJson(response);
@@ -733,13 +761,33 @@ function redactErrorMessage(err: unknown, redactText: TextRedactor = sanitizeSen
   return redactText(String(err));
 }
 
-function errorResult(err: unknown, redactText: TextRedactor = sanitizeSensitiveText): AdapterExecutionResult {
+function isConfiguredLoopbackRefusal(error: HermesHttpError, baseUrl: URL): boolean {
+  if (error.code !== "hermes_gateway_connect_failed" || !isLoopbackHostname(baseUrl.hostname)) return false;
+  const cause = asRecord(error.transportCause);
+  if (cause?.code !== "ECONNREFUSED") return false;
+  const port = Number(baseUrl.port || (baseUrl.protocol === "https:" ? 443 : 80));
+  const hostname = baseUrl.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const refusals = Array.isArray(cause.errors) ? cause.errors : [cause];
+  if (refusals.length === 0 || refusals.length > 8) return false;
+  return refusals.every((value) => {
+    const refusal = asRecord(value);
+    return refusal?.code === "ECONNREFUSED" && refusal.syscall === "connect" &&
+      refusal.port === port && typeof refusal.address === "string" &&
+      isLoopbackHostname(refusal.address) &&
+      (hostname === "localhost" || refusal.address.toLowerCase() === hostname);
+  });
+}
+
+function errorResult(err: unknown, baseUrl: URL, redactText: TextRedactor = sanitizeSensitiveText): AdapterExecutionResult {
   const hermesError = err as HermesHttpError;
   const code = hermesError.code ?? "hermes_gateway_protocol_error";
   const classified = hermesError.status ? classifyHttpError(hermesError.status) : null;
+  const loopbackRefused = isConfiguredLoopbackRefusal(hermesError, baseUrl);
   const errorMessage = code === "hermes_gateway_auth_failed"
     ? `${redactErrorMessage(err, redactText)}. Check adapterConfig.apiKey matches the Hermes API_SERVER_KEY for the running gateway.`
-    : redactErrorMessage(err, redactText);
+    : loopbackRefused
+      ? `${redactErrorMessage(err, redactText)}. The configured loopback gateway refers to the Paperclip server, not an agent sandbox or your browser's machine. Check that the Hermes API server is running there, or set adapterConfig.apiBaseUrl to its address reachable from the Paperclip server. Hermes Gateway connects to an already-running gateway; use hermes_local if Paperclip should launch the local Hermes CLI.`
+      : redactErrorMessage(err, redactText);
   return {
     exitCode: 1,
     signal: null,
@@ -749,6 +797,9 @@ function errorResult(err: unknown, redactText: TextRedactor = sanitizeSensitiveT
     retryNotBefore: hermesError.retryNotBefore ?? null,
     errorMessage,
     errorMeta: {
+      // Diagnosis only: a redirected request may have received a response
+      // before refusing a later connection. This never proves non-dispatch.
+      ...(loopbackRefused ? { category: "gateway_loopback_connection_refused", phase: "create_run" } : {}),
       ...(hermesError.status ? { status: hermesError.status } : {}),
       ...(hermesError.body ? { body: redactForLog(hermesError.body, [], 0, redactText) as Record<string, unknown> } : {}),
     },
@@ -852,6 +903,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   let runId: string | null = null;
   try {
+    // This adapter has no local child process, so crossing into the first
+    // remote create request is its dispatch boundary. Report it before the
+    // request can block so continuation gates may release their issue lock.
+    ctx.onDispatch?.();
     const created = await fetchJson(createRunUrl, {
       method: "POST",
       headers: runHeaders,
@@ -869,7 +924,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       };
     }
   } catch (err) {
-    return errorResult(err, redactText);
+    return errorResult(err, baseUrl, redactText);
   }
 
   await ctx.onLog("stdout", `[hermes-gateway] run created: ${runId}\n`);
