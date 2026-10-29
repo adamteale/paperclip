@@ -271,7 +271,7 @@ describe("parsePiJsonl", () => {
     ].join("\n");
 
     const parsed = parsePiJsonl(stdout);
-    expect(parsed.errors).toEqual(["Pi reported a turn-level error with no message."]);
+    expect(parsed.errors).toEqual(["Pi provider request failed."]);
   });
 
   it("does not treat a normal completed turn as an error", () => {
